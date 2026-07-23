@@ -1,16 +1,18 @@
-// Бой 3v3: урон/лечение/щит от цепочек, заряд и каст ульт. См. docs/DESIGN.md "Бой".
+// Бой 3v3: урон/лечение/щит от цепочек, заряд и каст ульт. См. docs/DESIGN.md "Бой"
+// и docs/research/combat_math_balance.md (ресерч формул жанра, 2026-07-24).
 
 import {
   ABILITY_TILE_CHARGE_BONUS,
   CHARGE_OTHER_ROLE,
   CHARGE_OWN_ROLE,
-  DEFENSE_MITIGATION_K,
+  DEF_REDUCTION_DENOMINATOR,
   FACTION_COUNTER_BONUS,
   FACTION_COUNTERS,
-  HEAL_OVERFLOW_TO_SHIELD,
   HEART_HEAL_BASE_FRACTION,
+  MAX_DEF_REDUCTION,
   OVERCHARGE_BONUS_PER_100,
   SHIELD_DEF_FRACTION,
+  SHIELD_MAX_FRACTION,
   SINGLE_HIT_MAX_FRACTION,
   SWORD_POWER,
   TAUNT_TURNS,
@@ -31,11 +33,12 @@ export function countersFaction(attacker: Faction, target: Faction): boolean {
   return FACTION_COUNTERS[attacker].includes(target);
 }
 
-function mitigation(def: number): number {
-  return DEFENSE_MITIGATION_K / (DEFENSE_MITIGATION_K + def);
+/** Смягчение в духе Idle Heroes: урон × (1 − reduction), reduction линеен по def с капом. */
+function defenseFactor(def: number): number {
+  return 1 - Math.min(MAX_DEF_REDUCTION, def / DEF_REDUCTION_DENOMINATOR);
 }
 
-/** Урон меч-цепочки по одной цели: сумма atk живых героев (с фракц. бонусом) × swordMult × mitigation. */
+/** Урон меч-цепочки по одной цели: sumAtk(с фракц. бонусом) × SWORD_POWER × swordMult × (1−reduction). */
 export function computeSwordDamage(actingTeam: TeamState, target: HeroState, chainLength: number): number {
   const mult = swordLengthMultiplier(chainLength);
   const sumAtk = actingTeam.heroes
@@ -44,7 +47,7 @@ export function computeSwordDamage(actingTeam: TeamState, target: HeroState, cha
       const bonus = countersFaction(h.hero.faction, target.hero.faction) ? 1 + FACTION_COUNTER_BONUS : 1;
       return sum + h.hero.atk * bonus;
     }, 0);
-  return sumAtk * SWORD_POWER * mult * mitigation(target.hero.def);
+  return sumAtk * SWORD_POWER * mult * defenseFactor(target.hero.def);
 }
 
 /** Наносит урон цели, сначала поглощая его командным щитом цели. */
@@ -58,23 +61,29 @@ function dealDamage(defendingTeam: TeamState, target: HeroState, rawDamage: numb
   target.hp = Math.max(0, target.hp - dmg);
 }
 
-/** Лечит команду: раненым - больше (масштаб от недостающего HP), излишек уходит в щит. */
-function applyHeal(team: TeamState, baseFraction: number, mult: number): void {
-  let overflowTotal = 0;
+/**
+ * Лечит команду: раненым - больше (масштаб от недостающего HP). Оверхил СГОРАЕТ -
+ * по ресерчу жанра избыток лечения никогда не конвертируется в другой ресурс.
+ * defenseMult - «усталость защиты» (анти-столл), после 30-го хода тает к нулю.
+ */
+function applyHeal(team: TeamState, baseFraction: number, mult: number, defenseMult: number): void {
   for (const hs of team.heroes) {
     if (hs.hp <= 0) continue;
     const missingFraction = (hs.hero.maxHp - hs.hp) / hs.hero.maxHp;
-    const healAmount = baseFraction * (1 + missingFraction) * hs.hero.maxHp * mult;
-    const newHp = Math.min(hs.hero.maxHp, hs.hp + healAmount);
-    overflowTotal += hs.hp + healAmount - newHp;
-    hs.hp = newHp;
+    const healAmount = baseFraction * (1 + missingFraction) * hs.hero.maxHp * mult * defenseMult;
+    hs.hp = Math.min(hs.hero.maxHp, hs.hp + healAmount);
   }
-  team.shield += overflowTotal * HEAL_OVERFLOW_TO_SHIELD;
 }
 
-function applyShield(team: TeamState, defFraction: number, mult: number): void {
+/** Кап командного щита: доля от суммарного maxHP живых героев (предсказуемый буфер). */
+function shieldCap(team: TeamState): number {
+  const aliveMaxHp = team.heroes.filter((h) => h.hp > 0).reduce((sum, h) => sum + h.hero.maxHp, 0);
+  return aliveMaxHp * SHIELD_MAX_FRACTION;
+}
+
+function applyShield(team: TeamState, defFraction: number, mult: number, defenseMult: number): void {
   const sumDef = team.heroes.filter((h) => h.hp > 0).reduce((sum, h) => sum + h.hero.def, 0);
-  team.shield += sumDef * defFraction * mult;
+  team.shield = Math.min(shieldCap(team), team.shield + sumDef * defFraction * mult * defenseMult);
 }
 
 const CHAIN_TYPE_TO_ROLE: Record<CombatTileType, UltimateType> = {
@@ -83,7 +92,7 @@ const CHAIN_TYPE_TO_ROLE: Record<CombatTileType, UltimateType> = {
   shield: 'tank',
 };
 
-/** Заряд ульты за цепочку: своя роль 100%, остальные 40%. */
+/** Заряд ульты за цепочку: своя роль CHARGE_OWN_ROLE, остальные CHARGE_OTHER_ROLE (ресурс роли!). */
 function applyChainCharge(team: TeamState, effectiveType: CombatTileType): void {
   const chargingRole = CHAIN_TYPE_TO_ROLE[effectiveType];
   for (const hs of team.heroes) {
@@ -113,14 +122,15 @@ function resolveFocusTarget(team: TeamState, focusTargetId?: string): HeroState 
 
 /**
  * Применяет боевой эффект резолвнутой цепочки (урон/хил/щит) + заряд ульт.
- * damageMult - внешний множитель урона (разогрев затяжного боя), лечение/щит не трогает.
+ * damageMult - «монетка» первого действия; defenseMult - «усталость защиты» (анти-столл).
  */
 export function applyChain(
   actingTeam: TeamState,
   defendingTeam: TeamState,
   chain: Chain,
   focusTargetId?: string,
-  damageMult = 1
+  damageMult = 1,
+  defenseMult = 1
 ): void {
   applyChainCharge(actingTeam, chain.effectiveType);
   if (chain.includesAbilityTile) applyAbilityTileBonus(actingTeam);
@@ -131,8 +141,7 @@ export function applyChain(
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
-        // Кап «нет ваншотов» - на базовый урон; монетка и разогрев поверх (разогрев обязан
-        // пробивать кап, иначе затяжные бои снова не заканчиваются).
+        // Кап «нет ваншотов» - на базовый урон; монетка поверх.
         const base = Math.min(
           computeSwordDamage(actingTeam, target, chain.cells.length),
           target.hero.maxHp * SINGLE_HIT_MAX_FRACTION
@@ -143,10 +152,10 @@ export function applyChain(
       break;
     }
     case 'heart':
-      applyHeal(actingTeam, HEART_HEAL_BASE_FRACTION, mult);
+      applyHeal(actingTeam, HEART_HEAL_BASE_FRACTION, mult, defenseMult);
       break;
     case 'shield':
-      applyShield(actingTeam, SHIELD_DEF_FRACTION, mult);
+      applyShield(actingTeam, SHIELD_DEF_FRACTION, mult, defenseMult);
       break;
   }
 }
@@ -161,14 +170,14 @@ export function previewChainEffect(
   type: CombatTileType,
   length: number,
   focusTargetId?: string,
-  damageMult = 1
+  damageMult = 1,
+  defenseMult = 1
 ): number {
   const mult = defenseLengthMultiplier(length);
   switch (type) {
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (!target) return 0;
-      // Тот же порядок, что в applyChain: кап базы, множители поверх - число честное.
       const base = Math.min(computeSwordDamage(actingTeam, target, length), target.hero.maxHp * SINGLE_HIT_MAX_FRACTION);
       return base * damageMult;
     }
@@ -177,13 +186,14 @@ export function previewChainEffect(
       for (const hs of actingTeam.heroes) {
         if (hs.hp <= 0) continue;
         const missingFraction = (hs.hero.maxHp - hs.hp) / hs.hero.maxHp;
-        total += HEART_HEAL_BASE_FRACTION * (1 + missingFraction) * hs.hero.maxHp * mult;
+        total += HEART_HEAL_BASE_FRACTION * (1 + missingFraction) * hs.hero.maxHp * mult * defenseMult;
       }
       return total;
     }
     case 'shield': {
       const sumDef = actingTeam.heroes.filter((h) => h.hp > 0).reduce((sum, h) => sum + h.hero.def, 0);
-      return sumDef * SHIELD_DEF_FRACTION * mult;
+      const gain = sumDef * SHIELD_DEF_FRACTION * mult * defenseMult;
+      return Math.min(gain, Math.max(0, shieldCap(actingTeam) - actingTeam.shield));
     }
   }
 }
@@ -194,7 +204,8 @@ export function castUltimate(
   actingTeam: TeamState,
   defendingTeam: TeamState,
   focusTargetId?: string,
-  damageMult = 1
+  damageMult = 1,
+  defenseMult = 1
 ): void {
   const overchargeExcess = Math.max(0, caster.charge - 1.0);
   const overchargeMult = 1 + OVERCHARGE_BONUS_PER_100 * overchargeExcess;
@@ -205,20 +216,18 @@ export function castUltimate(
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
         const bonus = countersFaction(caster.hero.faction, target.hero.faction) ? 1 + FACTION_COUNTER_BONUS : 1;
-        // Кап «нет ваншотов» покрывает и overcharge; разогрев/монетка (damageMult) - поверх.
-        const base = Math.min(
-          caster.hero.atk * power * bonus * overchargeMult * mitigation(target.hero.def),
-          target.hero.maxHp * SINGLE_HIT_MAX_FRACTION
-        );
+        // То же смягчение, что у меча; кап «нет ваншотов» покрывает overcharge.
+        const raw = caster.hero.atk * bonus * power * overchargeMult * defenseFactor(target.hero.def);
+        const base = Math.min(raw, target.hero.maxHp * SINGLE_HIT_MAX_FRACTION);
         dealDamage(defendingTeam, target, base * damageMult);
       }
       break;
     }
     case 'support':
-      applyHeal(actingTeam, power, overchargeMult);
+      applyHeal(actingTeam, power, overchargeMult, defenseMult);
       break;
     case 'tank':
-      applyShield(actingTeam, power, overchargeMult);
+      applyShield(actingTeam, power, overchargeMult, defenseMult);
       caster.tauntTurns = TAUNT_TURNS;
       break;
   }

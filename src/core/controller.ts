@@ -6,7 +6,7 @@ import { createBoard, resolveChain } from './board';
 import { applyChain, castUltimate, createTeamState } from './combat';
 import { createRng, type Rng } from './rng';
 import { decideTurn, type AiLevel } from './ai';
-import { computeDamageMult, decayShield, type TurnDecision } from './turn';
+import { computeDamageMult, computeDefenseMult, decayShield, type TurnDecision } from './turn';
 import {
   FIRST_ACTION_DAMAGE_MULT,
   MAX_BATTLE_TURNS,
@@ -238,10 +238,13 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   const shieldBeforeDecay = actingTeam.shield;
   decayShield(actingTeam);
   const damageMult = computeDamageMult(state.turns, state.firstActionDamageMult);
+  const defenseMult = computeDefenseMult(state.turns);
   const taunter = defendingTeam.heroes.find((h) => h.hp > 0 && h.tauntTurns > 0);
 
   state.log.push(
-    `--- Действие ${state.turns} | ходит ${acting} | множитель урона ${damageMult.toFixed(2)}` +
+    `--- Действие ${state.turns} | ходит ${acting}` +
+      (damageMult !== 1 ? ` | монетка ${damageMult.toFixed(2)}` : '') +
+      (defenseMult !== 1 ? ` | усталость защиты x${defenseMult.toFixed(2)}` : '') +
       (Math.round(shieldBeforeDecay) > 0
         ? ` | распад щита ${acting}: ${Math.round(shieldBeforeDecay)} → ${Math.round(shieldBeforeDecay * SHIELD_RETENTION_PER_TURN)}`
         : '')
@@ -256,7 +259,7 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
     if (caster) {
       const beforeA = snapshotTeam(state.teamA);
       const beforeB = snapshotTeam(state.teamB);
-      castUltimate(caster, actingTeam, defendingTeam, decision.focusTargetId, damageMult);
+      castUltimate(caster, actingTeam, defendingTeam, decision.focusTargetId, damageMult, defenseMult);
       const ultEvents: BattleEvent[] = [
         { type: 'ultimateCast', side: acting, heroId: caster.hero.id },
         ...diffTeamEvents('A', beforeA, state.teamA, caster.hero.id),
@@ -271,7 +274,7 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   const beforeA = snapshotTeam(state.teamA);
   const beforeB = snapshotTeam(state.teamB);
   resolveChain(state.board, decision.chain, state.rng);
-  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, damageMult);
+  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, damageMult, defenseMult);
   const chainEvents: BattleEvent[] = [
     { type: 'chainResolved', side: acting, chain: decision.chain },
     ...diffTeamEvents('A', beforeA, state.teamA),
@@ -323,7 +326,8 @@ export function playUltimate(state: BattleState, side: Side, casterId: string, f
   const beforeA = snapshotTeam(state.teamA);
   const beforeB = snapshotTeam(state.teamB);
   const damageMult = computeDamageMult(state.turns + 1, state.firstActionDamageMult);
-  castUltimate(caster, actingTeam, defendingTeam, focusTargetId ?? defaultFocusTarget(defendingTeam), damageMult);
+  const defenseMult = computeDefenseMult(state.turns + 1);
+  castUltimate(caster, actingTeam, defendingTeam, focusTargetId ?? defaultFocusTarget(defendingTeam), damageMult, defenseMult);
 
   const events: BattleEvent[] = [
     { type: 'ultimateCast', side, heroId: casterId },

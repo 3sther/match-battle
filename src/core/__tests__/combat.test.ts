@@ -8,9 +8,10 @@ import {
 } from '../combat';
 import { simulateBattle } from '../index';
 import {
+  ABILITY_TILE_CHARGE_BONUS,
   CHARGE_OTHER_ROLE,
   CHARGE_OWN_ROLE,
-  DEFENSE_MITIGATION_K,
+  DEF_REDUCTION_DENOMINATOR,
   FACTION_COUNTER_BONUS,
   HEART_HEAL_BASE_FRACTION,
   OVERCHARGE_BONUS_PER_100,
@@ -56,18 +57,17 @@ describe('урон меч-цепочки', () => {
     const target = createTeamState([makeHero({ id: 'def', def: 0, faction: 'yin' })]).heroes[0];
 
     const dmg = computeSwordDamage(team, target, 3);
-    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3) * (DEFENSE_MITIGATION_K / DEFENSE_MITIGATION_K);
+    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3); // def 0 → reduction 0
     expect(dmg).toBeCloseTo(expected, 5);
   });
 
-  it('защита цели смягчает урон по формуле K/(K+def)', () => {
+  it('защита цели смягчает урон линейно: × (1 − def/DENOM)', () => {
     const attacker = makeHero({ id: 'atk', atk: 100, faction: 'fire' });
     const team = createTeamState([attacker]);
     const target = createTeamState([makeHero({ id: 'def', def: 100, faction: 'water' })]).heroes[0];
 
     const dmg = computeSwordDamage(team, target, 3);
-    const mitigation = DEFENSE_MITIGATION_K / (DEFENSE_MITIGATION_K + 100);
-    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3) * mitigation;
+    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3) * (1 - 100 / DEF_REDUCTION_DENOMINATOR);
     expect(dmg).toBeCloseTo(expected, 5);
   });
 
@@ -104,7 +104,7 @@ describe('лечение и щит от цепочек', () => {
     expect(team.heroes[1].hp - 500).toBeGreaterThan(team.heroes[0].hp - 900);
   });
 
-  it('излишек лечения сверх maxHP уходит в командный щит', () => {
+  it('оверхил сгорает: HP не выше maxHp и щит НЕ растёт (ресерч жанра)', () => {
     const hero = makeHero({ id: 'full-hp', maxHp: 100 });
     const team = createTeamState([hero]);
     const enemyTeam = createTeamState([makeHero({ id: 'enemy' })]);
@@ -113,7 +113,7 @@ describe('лечение и щит от цепочек', () => {
     applyChain(team, enemyTeam, chain);
 
     expect(team.heroes[0].hp).toBe(100); // не выше maxHp
-    expect(team.shield).toBeGreaterThan(0); // излишек ушёл в щит
+    expect(team.shield).toBe(0); // оверхил не конвертируется в щит
   });
 
   it('щит-цепочка добавляет sumDef × SHIELD_DEF_FRACTION × chainMult в командный щит', () => {
@@ -151,8 +151,8 @@ describe('заряд ульты по ролям', () => {
     const chain: Chain = { cells: [{ row: 0, col: 0 }, { row: 0, col: 1 }, { row: 0, col: 2 }], effectiveType: 'shield', includesAbilityTile: true };
     applyChain(team, enemyTeam, chain);
 
-    // 0.4 (чужая роль за shield-чейн) + 1.0 (ability-бонус)
-    expect(team.heroes[0].charge).toBeCloseTo(CHARGE_OTHER_ROLE + 1.0, 5);
+    // чужая роль за shield-чейн + ability-бонус (константы из config)
+    expect(team.heroes[0].charge).toBeCloseTo(CHARGE_OTHER_ROLE + ABILITY_TILE_CHARGE_BONUS, 5);
   });
 });
 

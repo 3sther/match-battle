@@ -5,7 +5,7 @@ import { createBoard } from './board';
 import { createTeamState } from './combat';
 import { decideTurn, type AiLevel } from './ai';
 import { createRng } from './rng';
-import { applyTurnDecision, computeDamageMult, decayShield } from './turn';
+import { applyTurnDecision, computeDamageMult, computeDefenseMult, decayShield } from './turn';
 import { FIRST_ACTION_DAMAGE_MULT, MAX_BATTLE_TURNS, SECOND_PLAYER_START_CHARGE } from './config';
 import type { Hero, TeamState } from './types';
 
@@ -74,9 +74,10 @@ export function simulateBattle(
       continue; // на доске нет ни одной матчнутой цепочки - пропуск хода (крайний случай)
     }
 
-    // Разогрев (после ENRAGE_START_TURN) + «монетка» первого действия команды A.
+    // «Монетка» первого действия + «усталость защиты» после FATIGUE_START_TURN.
     const damageMult = computeDamageMult(turns, firstActionDamageMult);
-    applyTurnDecision(board, actingTeam, defendingTeam, decision, rng, damageMult);
+    const defenseMult = computeDefenseMult(turns);
+    applyTurnDecision(board, actingTeam, defendingTeam, decision, rng, damageMult, defenseMult);
 
     acting = acting === 'A' ? 'B' : 'A';
   }

@@ -12,7 +12,7 @@ import {
 } from '../core/controller';
 import { decideTurn, type AiLevel } from '../core/ai';
 import { previewChainEffect } from '../core/combat';
-import { computeDamageMult } from '../core/turn';
+import { computeDamageMult, computeDefenseMult } from '../core/turn';
 import { MAX_CHAIN_LENGTH } from '../core/config';
 import type { Chain, CombatTileType, Faction, Hero, HeroState, Position, TileType } from '../core/types';
 import { pickRandomTeams } from './HomeScene';
@@ -492,7 +492,8 @@ export class BattleScene extends Phaser.Scene {
     const actingTeam = side === 'A' ? this.state.teamA : this.state.teamB;
     const defendingTeam = side === 'A' ? this.state.teamB : this.state.teamA;
     const damageMult = computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
-    const amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId, damageMult);
+    const defenseMult = computeDefenseMult(this.state.turns + 1);
+    const amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId, damageMult, defenseMult);
     const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
     this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
     this.dragLabel.setText(`${side === 'B' ? 'AI: ' : ''}${Math.round(amount)}`);
