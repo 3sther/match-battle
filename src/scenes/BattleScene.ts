@@ -87,7 +87,10 @@ export class BattleScene extends Phaser.Scene {
   }
 
   create(data: BattleInitData): void {
-    this.state = createBattle(data.heroesA, data.heroesB, data.seed);
+    // Соло-режим: первым ходит AI (сторона B) - «монетка» первого действия ложится на него,
+    // а цепочки игрока всегда бьют в полную силу (по плейтесту ослабленный первый ход игрока
+    // ощущался как несправедливость, хотя статистически был честен).
+    this.state = createBattle(data.heroesA, data.heroesB, data.seed, { firstActing: 'B' });
     this.locked = false;
     this.focusTargetId = undefined;
     this.lastOwnTapHeroId = undefined;
@@ -127,6 +130,12 @@ export class BattleScene extends Phaser.Scene {
     this.layout();
     this.redrawBoard();
     this.refreshHud();
+
+    // AI открывает бой: блокируем ввод и даём ему сделать первый ход.
+    if (this.state.acting === 'B') {
+      this.locked = true;
+      this.time.delayedCall(900, () => this.runAiTurn());
+    }
   }
 
   // ---------------------------------------------------------------------------------------
@@ -482,10 +491,8 @@ export class BattleScene extends Phaser.Scene {
     }
     const actingTeam = side === 'A' ? this.state.teamA : this.state.teamB;
     const defendingTeam = side === 'A' ? this.state.teamB : this.state.teamA;
-    let amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId);
-    if (type === 'sword') {
-      amount *= computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
-    }
+    const damageMult = computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
+    const amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId, damageMult);
     const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
     this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
     this.dragLabel.setText(`${side === 'B' ? 'AI: ' : ''}${Math.round(amount)}`);

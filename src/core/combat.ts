@@ -11,6 +11,7 @@ import {
   HEART_HEAL_BASE_FRACTION,
   OVERCHARGE_BONUS_PER_100,
   SHIELD_DEF_FRACTION,
+  SINGLE_HIT_MAX_FRACTION,
   SWORD_POWER,
   TAUNT_TURNS,
   ULTIMATE_POWER,
@@ -128,8 +129,13 @@ export function applyChain(
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
-        const dmg = computeSwordDamage(actingTeam, target, chain.cells.length) * damageMult;
-        dealDamage(defendingTeam, target, dmg);
+        // Кап «нет ваншотов» - на базовый урон; монетка и разогрев поверх (разогрев обязан
+        // пробивать кап, иначе затяжные бои снова не заканчиваются).
+        const base = Math.min(
+          computeSwordDamage(actingTeam, target, chain.cells.length),
+          target.hero.maxHp * SINGLE_HIT_MAX_FRACTION
+        );
+        dealDamage(defendingTeam, target, base * damageMult);
         if (target.tauntTurns > 0) target.tauntTurns--;
       }
       break;
@@ -152,13 +158,17 @@ export function previewChainEffect(
   defendingTeam: TeamState,
   type: CombatTileType,
   length: number,
-  focusTargetId?: string
+  focusTargetId?: string,
+  damageMult = 1
 ): number {
   const mult = chainLengthMultiplier(length);
   switch (type) {
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
-      return target ? computeSwordDamage(actingTeam, target, length) : 0;
+      if (!target) return 0;
+      // Тот же порядок, что в applyChain: кап базы, множители поверх - число честное.
+      const base = Math.min(computeSwordDamage(actingTeam, target, length), target.hero.maxHp * SINGLE_HIT_MAX_FRACTION);
+      return base * damageMult;
     }
     case 'heart': {
       let total = 0;
@@ -193,8 +203,12 @@ export function castUltimate(
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
         const bonus = countersFaction(caster.hero.faction, target.hero.faction) ? 1 + FACTION_COUNTER_BONUS : 1;
-        const dmg = caster.hero.atk * power * bonus * overchargeMult * mitigation(target.hero.def) * damageMult;
-        dealDamage(defendingTeam, target, dmg);
+        // Кап «нет ваншотов» покрывает и overcharge; разогрев/монетка (damageMult) - поверх.
+        const base = Math.min(
+          caster.hero.atk * power * bonus * overchargeMult * mitigation(target.hero.def),
+          target.hero.maxHp * SINGLE_HIT_MAX_FRACTION
+        );
+        dealDamage(defendingTeam, target, base * damageMult);
       }
       break;
     }

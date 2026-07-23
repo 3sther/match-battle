@@ -38,6 +38,8 @@ export interface BattleState {
 export interface CreateBattleOptions {
   secondPlayerStartCharge?: number;
   firstActionDamageMult?: number;
+  /** Кто ходит первым (по умолчанию A). В соло-режиме первым ходит AI - монетка ложится на него. */
+  firstActing?: Side;
 }
 
 /** Создаёт новый бой 3v3: доску, команды, стартовый заряд второй команды (компенсация хода). */
@@ -50,22 +52,25 @@ export function createBattle(
   const {
     secondPlayerStartCharge = SECOND_PLAYER_START_CHARGE,
     firstActionDamageMult = FIRST_ACTION_DAMAGE_MULT,
+    firstActing = 'A',
   } = opts;
   const rng = createRng(seed);
   const board = createBoard(rng);
   const teamA = createTeamState(heroesA);
   const teamB = createTeamState(heroesB);
-  for (const hs of teamB.heroes) hs.charge = secondPlayerStartCharge;
+  // Компенсация достаётся стороне, ходящей ВТОРОЙ.
+  const secondTeam = firstActing === 'A' ? teamB : teamA;
+  for (const hs of secondTeam.heroes) hs.charge = secondPlayerStartCharge;
 
   const fmtHero = (h: Hero) =>
     `${h.id} [${h.faction}/${h.role}] hp${h.maxHp} atk${h.atk} def${h.def} ульта:${h.ultimate.type}x${h.ultimate.power}`;
   const log = [
-    `=== БОЙ: сид ${seed}, монетка ${firstActionDamageMult}, стартовый заряд B ${secondPlayerStartCharge}`,
+    `=== БОЙ: сид ${seed}, монетка ${firstActionDamageMult} (на первый ход ${firstActing}), стартовый заряд второго ${secondPlayerStartCharge}`,
     `A (игрок): ${heroesA.map(fmtHero).join(' | ')}`,
     `B (AI):    ${heroesB.map(fmtHero).join(' | ')}`,
   ];
 
-  return { board, teamA, teamB, rng, acting: 'A', turns: 0, firstActionDamageMult, status: 'ongoing', log };
+  return { board, teamA, teamB, rng, acting: firstActing, turns: 0, firstActionDamageMult, status: 'ongoing', log };
 }
 
 function isAdjacent(a: Position, b: Position): boolean {
