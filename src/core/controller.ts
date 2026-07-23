@@ -3,7 +3,7 @@
 // с headless-симулятором (simulateBattle в index.ts) - см. turn.ts, единая точка правды.
 
 import { createBoard } from './board';
-import { createTeamState } from './combat';
+import { castUltimate, createTeamState } from './combat';
 import { createRng, type Rng } from './rng';
 import { decideTurn, type AiLevel } from './ai';
 import { applyTurnDecision, computeDamageMult, decayShield, type TurnDecision } from './turn';
@@ -209,6 +209,32 @@ export interface PlayActionInput {
 export function playAction(state: BattleState, input: PlayActionInput): ActionResult {
   if (state.status !== 'ongoing') return { events: [], status: state.status };
   return runTurn(state, input);
+}
+
+/**
+ * Мгновенный каст ульты ВНЕ цепочки (по двойному тапу игрока). Ход не тратится и очередь
+ * не передаётся - после каста та же сторона рисует цепочку. Множитель урона - как у
+ * предстоящего действия этой стороны (разогрев учтён; на самом первом действии - и монетка).
+ */
+export function playUltimate(state: BattleState, side: Side, casterId: string, focusTargetId?: string): ActionResult {
+  if (state.status !== 'ongoing' || state.acting !== side) return { events: [], status: state.status };
+  const actingTeam = side === 'A' ? state.teamA : state.teamB;
+  const defendingTeam = side === 'A' ? state.teamB : state.teamA;
+  const caster = actingTeam.heroes.find((h) => h.hero.id === casterId && h.hp > 0 && h.charge >= 1);
+  if (!caster) return { events: [], status: state.status };
+
+  const beforeA = snapshotTeam(state.teamA);
+  const beforeB = snapshotTeam(state.teamB);
+  const damageMult = computeDamageMult(state.turns + 1, state.firstActionDamageMult);
+  castUltimate(caster, actingTeam, defendingTeam, focusTargetId ?? defaultFocusTarget(defendingTeam), damageMult);
+
+  const events: BattleEvent[] = [
+    { type: 'ultimateCast', side, heroId: casterId },
+    ...diffTeamEvents('A', beforeA, state.teamA, casterId),
+    ...diffTeamEvents('B', beforeB, state.teamB, casterId),
+  ];
+  state.status = computeStatus(state);
+  return { events, status: state.status };
 }
 
 /** Ход AI текущей стороны - решение через decideTurn (ai.ts). */

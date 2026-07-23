@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyChain, castUltimate, createTeamState } from '../combat';
 import { simulateBattle } from '../index';
+import { createBattle, playUltimate } from '../controller';
 import type { Chain, Hero } from '../types';
 
 function makeHero(id: string, overrides: Partial<Hero> = {}): Hero {
@@ -49,6 +50,33 @@ describe('damageMult (разогрев затяжного боя)', () => {
       return 1000 - defending.heroes[0].hp;
     };
     expect(cast(2)).toBeCloseTo(cast(1) * 2, 6);
+  });
+});
+
+describe('playUltimate - ульта вне цепочки', () => {
+  it('кастует немедленно, не тратит ход и не передаёт очередь', () => {
+    const teamA = [makeHero('a1'), makeHero('a2'), makeHero('a3')];
+    const teamB = [makeHero('b1'), makeHero('b2'), makeHero('b3')];
+    const state = createBattle(teamA, teamB, 7);
+    state.teamA.heroes[0].charge = 1.5;
+
+    const result = playUltimate(state, 'A', 'a1', 'b1');
+
+    expect(result.events.some((e) => e.type === 'ultimateCast' && e.heroId === 'a1')).toBe(true);
+    expect(state.teamB.heroes[0].hp).toBeLessThan(1000); // dd-ульта нанесла урон цели
+    expect(state.teamA.heroes[0].charge).toBe(0); // заряд сброшен
+    expect(state.turns).toBe(0); // ход не потрачен
+    expect(state.acting).toBe('A'); // очередь осталась у кастующего
+  });
+
+  it('отклоняет каст без заряда и не в свой ход', () => {
+    const teamA = [makeHero('a1'), makeHero('a2'), makeHero('a3')];
+    const teamB = [makeHero('b1'), makeHero('b2'), makeHero('b3')];
+    const state = createBattle(teamA, teamB, 7);
+
+    expect(playUltimate(state, 'A', 'a1').events).toHaveLength(0); // заряд 0
+    state.teamB.heroes[0].charge = 1;
+    expect(playUltimate(state, 'B', 'b1').events).toHaveLength(0); // не ход B
   });
 });
 

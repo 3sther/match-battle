@@ -6,12 +6,15 @@ import {
   getValidChainFromPath,
   playAction,
   playAiAction,
+  playUltimate,
   type BattleEvent,
   type BattleState,
 } from '../core/controller';
 import { decideTurn, type AiLevel } from '../core/ai';
+import { previewChainEffect } from '../core/combat';
+import { computeDamageMult } from '../core/turn';
 import { MAX_CHAIN_LENGTH } from '../core/config';
-import type { Chain, Faction, Hero, HeroState, Position, TileType } from '../core/types';
+import type { Chain, CombatTileType, Faction, Hero, HeroState, Position, TileType } from '../core/types';
 import { pickRandomTeams } from './HomeScene';
 
 const CELL_SIZE = 76;
@@ -74,7 +77,9 @@ export class BattleScene extends Phaser.Scene {
   private teamBShieldBarBg!: Phaser.GameObjects.Rectangle;
 
   private focusTargetId?: string;
-  private pendingUltimateCasterId?: string;
+  /** Для двойного тапа по своему герою (каст ульты). */
+  private lastOwnTapHeroId?: string;
+  private lastOwnTapTime = 0;
 
   constructor() {
     super('Battle');
@@ -84,13 +89,14 @@ export class BattleScene extends Phaser.Scene {
     this.state = createBattle(data.heroesA, data.heroesB, data.seed);
     this.locked = false;
     this.focusTargetId = undefined;
-    this.pendingUltimateCasterId = undefined;
+    this.lastOwnTapHeroId = undefined;
     this.portraits = [];
 
     this.selectionGraphics = this.add.graphics();
     this.aiHighlightGraphics = this.add.graphics();
+    // Одно «красивое число» - прогноз эффекта цепочки, растёт по мере протяжки (фиксировано над доской).
     this.dragLabel = this.add
-      .text(0, 0, '', { fontFamily: 'sans-serif', fontSize: '22px', color: '#ffffff' })
+      .text(0, 0, '', { fontFamily: 'Georgia, serif', fontSize: '44px', color: '#ffffff', fontStyle: 'bold' })
       .setOrigin(0.5, 1)
       .setDepth(20)
       .setVisible(false);
@@ -208,14 +214,25 @@ export class BattleScene extends Phaser.Scene {
       this.refreshHud();
       return;
     }
-    // Своя команда - тап кастует готовую ульту (заряд >=100%). Ульта применяется вместе
-    // со следующей цепочкой в одном ходе (ход не тратится отдельно - см. DESIGN.md).
+    // Своя команда: ДВОЙНОЙ тап по герою с зарядом >=100% кастует ульту немедленно, вне
+    // цепочки. Ход при этом не тратится - после ульты игрок рисует цепочку как обычно.
     if (this.state.acting !== 'A') return;
     const hs = this.state.teamA.heroes.find((h) => h.hero.id === view.heroId);
     if (!hs || hs.hp <= 0 || hs.charge < 1) return;
-    this.pendingUltimateCasterId = this.pendingUltimateCasterId === view.heroId ? undefined : view.heroId;
-    if (this.pendingUltimateCasterId) this.flashUltimateArm(view);
-    this.refreshHud();
+
+    const now = this.time.now;
+    if (this.lastOwnTapHeroId === view.heroId && now - this.lastOwnTapTime < 600) {
+      this.lastOwnTapHeroId = undefined;
+      const focus = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
+      const result = playUltimate(this.state, 'A', view.heroId, focus);
+      this.playEvents(result.events);
+      this.refreshHud();
+      this.finishIfGameOver(result.status);
+      return;
+    }
+    this.lastOwnTapHeroId = view.heroId;
+    this.lastOwnTapTime = now;
+    this.flashUltimateArm(view); // первый тап - вспышка-подсказка, второй в течение 0.6с - каст
   }
 
   private flashUltimateArm(view: PortraitView): void {
@@ -250,10 +267,19 @@ export class BattleScene extends Phaser.Scene {
     };
   }
 
-  private cellAt(x: number, y: number): Position | null {
+  /**
+   * strict=true (протяжка): клетка засчитывается только около центра (радиус 0.42*CELL) -
+   * иначе диагональный свайп цепляет угловых соседей, что особенно ломало цепочки через
+   * ability-тайл (после него подходит ЛЮБОЙ тип, и случайная клетка убивала задуманный путь).
+   */
+  private cellAt(x: number, y: number, strict = false): Position | null {
     const col = Math.floor((x - this.boardOriginX) / CELL_SIZE);
     const row = Math.floor((y - this.boardOriginY) / CELL_SIZE);
     if (row < 0 || row >= 7 || col < 0 || col >= 7) return null;
+    if (strict) {
+      const c = this.cellCenter({ row, col });
+      if (Math.hypot(x - c.x, y - c.y) > CELL_SIZE * 0.42) return null;
+    }
     return { row, col };
   }
 
@@ -317,7 +343,7 @@ export class BattleScene extends Phaser.Scene {
 
   private onPointerMove(p: Phaser.Input.Pointer): void {
     if (!this.dragging) return;
-    const cell = this.cellAt(p.x, p.y);
+    const cell = this.cellAt(p.x, p.y, true);
     if (!cell) return;
     const last = this.dragPath[this.dragPath.length - 1];
     if (last.row === cell.row && last.col === cell.col) return;
@@ -358,10 +384,23 @@ export class BattleScene extends Phaser.Scene {
     for (const pt of pts.slice(1)) this.selectionGraphics.lineTo(pt.x, pt.y);
     this.selectionGraphics.strokePath();
 
-    const type = this.state.board.grid[this.dragPath[0].row][this.dragPath[0].col].type;
-    const last = pts[pts.length - 1];
-    this.dragLabel.setPosition(last.x, last.y - CELL_SIZE * 0.5);
-    this.dragLabel.setText(`${this.dragPath.length} × ${type}`);
+    // Прогноз эффекта цепочки - одно растущее число над доской, цвет по типу цепочки.
+    const baseType = this.dragPath
+      .map((p) => this.state.board.grid[p.row][p.col].type)
+      .find((t) => t !== 'ability') as CombatTileType | undefined;
+    if (!baseType || this.dragPath.length < 3) {
+      this.dragLabel.setVisible(false);
+      return;
+    }
+    const focus = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
+    let amount = previewChainEffect(this.state.teamA, this.state.teamB, baseType, this.dragPath.length, focus);
+    if (baseType === 'sword') {
+      amount *= computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
+    }
+    const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
+    this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
+    this.dragLabel.setText(`${Math.round(amount)}`);
+    this.dragLabel.setColor(colors[baseType]);
     this.dragLabel.setVisible(true);
   }
 
@@ -371,11 +410,9 @@ export class BattleScene extends Phaser.Scene {
 
   private commitPlayerAction(chain: Chain): void {
     this.locked = true;
-    const ultimateCasterId = this.pendingUltimateCasterId;
-    this.pendingUltimateCasterId = undefined;
     const focusTargetId = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
 
-    const result = playAction(this.state, { chain, ultimateCasterId, focusTargetId });
+    const result = playAction(this.state, { chain, focusTargetId });
     this.redrawBoard();
     this.playEvents(result.events);
     this.refreshHud();
@@ -397,24 +434,40 @@ export class BattleScene extends Phaser.Scene {
       return;
     }
 
-    // Игрок видит ход соперника до применения - прообраз PvP-трансляции (см. DESIGN.md M7).
-    this.highlightChain(this.aiHighlightGraphics, decision.chain, 0xd94a3d);
-    this.time.delayedCall(500, () => {
-      this.aiHighlightGraphics.clear();
-      const result = playAiAction(this.state, AI_LEVEL);
-      this.redrawBoard();
-      this.playEvents(result.events);
-      this.refreshHud();
-      this.locked = false;
-      this.finishIfGameOver(result.status);
+    // Игрок видит, как соперник «тянет» цепочку клетка за клеткой - прообраз PvP-трансляции
+    // (см. DESIGN.md M7). После полной прорисовки цепочка держится ещё 600мс, затем ход.
+    const stepMs = Phaser.Math.Clamp(1500 / decision.chain.cells.length, 90, 200);
+    this.animateChainDraw(decision.chain, stepMs, () => {
+      this.time.delayedCall(600, () => {
+        this.aiHighlightGraphics.clear();
+        const result = playAiAction(this.state, AI_LEVEL);
+        this.redrawBoard();
+        this.playEvents(result.events);
+        this.refreshHud();
+        this.locked = false;
+        this.finishIfGameOver(result.status);
+      });
     });
   }
 
-  private highlightChain(g: Phaser.GameObjects.Graphics, chain: Chain, color: number): void {
-    g.clear();
-    g.lineStyle(6, color, 0.9);
+  /** Поклеточная прорисовка цепочки AI: круг за кругом + линия, как будто соперник ведёт палец. */
+  private animateChainDraw(chain: Chain, stepMs: number, onDone: () => void): void {
     const pts = chain.cells.map((pos) => this.cellCenter(pos));
-    for (const pt of pts) g.strokeCircle(pt.x, pt.y, CELL_SIZE * 0.4);
+    let shown = 0;
+    const g = this.aiHighlightGraphics;
+    const drawStep = () => {
+      shown++;
+      g.clear();
+      g.lineStyle(6, 0xd94a3d, 0.9);
+      for (const pt of pts.slice(0, shown)) g.strokeCircle(pt.x, pt.y, CELL_SIZE * 0.4);
+      g.beginPath();
+      g.moveTo(pts[0].x, pts[0].y);
+      for (const pt of pts.slice(1, shown)) g.lineTo(pt.x, pt.y);
+      g.strokePath();
+      if (shown < pts.length) this.time.delayedCall(stepMs, drawStep);
+      else onDone();
+    };
+    drawStep();
   }
 
   // ---------------------------------------------------------------------------------------

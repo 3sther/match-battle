@@ -143,6 +143,39 @@ export function applyChain(
   }
 }
 
+/**
+ * Прогноз эффекта цепочки для UI: урон по цели / суммарное лечение / щит для цепочки данной
+ * длины. Формулы те же, что применяет applyChain, - только без побочных эффектов.
+ */
+export function previewChainEffect(
+  actingTeam: TeamState,
+  defendingTeam: TeamState,
+  type: CombatTileType,
+  length: number,
+  focusTargetId?: string
+): number {
+  const mult = chainLengthMultiplier(length);
+  switch (type) {
+    case 'sword': {
+      const target = resolveFocusTarget(defendingTeam, focusTargetId);
+      return target ? computeSwordDamage(actingTeam, target, length) : 0;
+    }
+    case 'heart': {
+      let total = 0;
+      for (const hs of actingTeam.heroes) {
+        if (hs.hp <= 0) continue;
+        const missingFraction = (hs.hero.maxHp - hs.hp) / hs.hero.maxHp;
+        total += HEART_HEAL_BASE_FRACTION * (1 + missingFraction) * hs.hero.maxHp * mult;
+      }
+      return total;
+    }
+    case 'shield': {
+      const sumDef = actingTeam.heroes.filter((h) => h.hp > 0).reduce((sum, h) => sum + h.hero.def, 0);
+      return sumDef * SHIELD_DEF_FRACTION * mult;
+    }
+  }
+}
+
 /** Кастует ульту героя. Заряд сбрасывается в 0 независимо от исхода. */
 export function castUltimate(
   caster: HeroState,
