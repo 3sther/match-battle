@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { createRng } from '../core/rng';
 import { generateRoster } from '../../sim/roster';
 import type { Hero } from '../core/types';
+import { getSavedLogsText, showTextOverlay } from './logOverlay';
 
 /** Случайно перемешивает тестовый ростер (Фишер-Йетс на сидированном RNG) и режет на 2 команды 3v3. */
 export function pickRandomTeams(seed: number): { teamA: Hero[]; teamB: Hero[] } {
@@ -57,6 +58,14 @@ export class HomeScene extends Phaser.Scene {
     this.fullscreenInfo = this.add
       .text(0, 0, '', { fontFamily: 'monospace', fontSize: '18px', color: '#6d84a0', align: 'center' })
       .setOrigin(0.5);
+
+    // Дебаг: история логов последних 5 боёв (localStorage) - для верификации баланса.
+    this.add
+      .text(12, 12, 'ЛОГИ БОЁВ', {
+        fontFamily: 'sans-serif', fontSize: '20px', color: '#9db4d0', backgroundColor: '#1a2b45', padding: { x: 10, y: 6 },
+      })
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => showTextOverlay(getSavedLogsText()));
 
     this.scale.on('resize', () => this.layout());
     this.time.addEvent({ delay: 1000, loop: true, callback: () => this.refreshFullscreenInfo() });

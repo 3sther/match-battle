@@ -16,6 +16,7 @@ import { computeDamageMult } from '../core/turn';
 import { MAX_CHAIN_LENGTH } from '../core/config';
 import type { Chain, CombatTileType, Faction, Hero, HeroState, Position, TileType } from '../core/types';
 import { pickRandomTeams } from './HomeScene';
+import { showTextOverlay } from './logOverlay';
 
 const CELL_SIZE = 76;
 const BOARD_PX = CELL_SIZE * 7;
@@ -397,20 +398,12 @@ export class BattleScene extends Phaser.Scene {
     const baseType = this.dragPath
       .map((p) => this.state.board.grid[p.row][p.col].type)
       .find((t) => t !== 'ability') as CombatTileType | undefined;
-    if (!baseType || this.dragPath.length < 3) {
+    if (!baseType) {
       this.dragLabel.setVisible(false);
       return;
     }
     const focus = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
-    let amount = previewChainEffect(this.state.teamA, this.state.teamB, baseType, this.dragPath.length, focus);
-    if (baseType === 'sword') {
-      amount *= computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
-    }
-    const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
-    this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
-    this.dragLabel.setText(`${Math.round(amount)}`);
-    this.dragLabel.setColor(colors[baseType]);
-    this.dragLabel.setVisible(true);
+    this.showChainNumber('A', baseType, this.dragPath.length, focus);
   }
 
   // ---------------------------------------------------------------------------------------
@@ -444,11 +437,12 @@ export class BattleScene extends Phaser.Scene {
     }
 
     // Игрок видит, как соперник «тянет» цепочку клетка за клеткой - прообраз PvP-трансляции
-    // (см. DESIGN.md M7). После полной прорисовки цепочка держится ещё 600мс, затем ход.
-    const stepMs = Phaser.Math.Clamp(1500 / decision.chain.cells.length, 90, 200);
-    this.animateChainDraw(decision.chain, stepMs, () => {
-      this.time.delayedCall(600, () => {
+    // (см. DESIGN.md M7). После полной прорисовки цепочка держится ещё секунду, затем ход.
+    const stepMs = Phaser.Math.Clamp(2600 / decision.chain.cells.length, 150, 340);
+    this.animateChainDraw(decision.chain, stepMs, decision.focusTargetId, () => {
+      this.time.delayedCall(1000, () => {
         this.aiHighlightGraphics.clear();
+        this.dragLabel.setVisible(false);
         const result = playAiAction(this.state, AI_LEVEL);
         this.redrawBoard();
         this.playEvents(result.events);
@@ -459,8 +453,8 @@ export class BattleScene extends Phaser.Scene {
     });
   }
 
-  /** Поклеточная прорисовка цепочки AI: круг за кругом + линия, как будто соперник ведёт палец. */
-  private animateChainDraw(chain: Chain, stepMs: number, onDone: () => void): void {
+  /** Поклеточная прорисовка цепочки AI + растущее число-прогноз, как при протяжке игрока. */
+  private animateChainDraw(chain: Chain, stepMs: number, focusTargetId: string | undefined, onDone: () => void): void {
     const pts = chain.cells.map((pos) => this.cellCenter(pos));
     let shown = 0;
     const g = this.aiHighlightGraphics;
@@ -473,10 +467,30 @@ export class BattleScene extends Phaser.Scene {
       g.moveTo(pts[0].x, pts[0].y);
       for (const pt of pts.slice(1, shown)) g.lineTo(pt.x, pt.y);
       g.strokePath();
+      this.showChainNumber('B', chain.effectiveType, shown, focusTargetId);
       if (shown < pts.length) this.time.delayedCall(stepMs, drawStep);
       else onDone();
     };
     drawStep();
+  }
+
+  /** Число-прогноз эффекта цепочки над доской - общее для протяжки игрока и превью AI. */
+  private showChainNumber(side: 'A' | 'B', type: CombatTileType, length: number, focusTargetId?: string): void {
+    if (length < 3) {
+      this.dragLabel.setVisible(false);
+      return;
+    }
+    const actingTeam = side === 'A' ? this.state.teamA : this.state.teamB;
+    const defendingTeam = side === 'A' ? this.state.teamB : this.state.teamA;
+    let amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId);
+    if (type === 'sword') {
+      amount *= computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
+    }
+    const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
+    this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
+    this.dragLabel.setText(`${side === 'B' ? 'AI: ' : ''}${Math.round(amount)}`);
+    this.dragLabel.setColor(colors[type]);
+    this.dragLabel.setVisible(true);
   }
 
   // ---------------------------------------------------------------------------------------
@@ -550,6 +564,11 @@ export class BattleScene extends Phaser.Scene {
 
       const alive = hs.hp > 0;
       view.circle.setFillStyle(alive ? FACTION_COLOR[hs.hero.faction] : DEAD_COLOR, alive ? 1 : 0.6);
+      // Провокация (танк-ульта): толстая синяя обводка - следующий меч-удар перехватит этот герой.
+      view.circle.setStrokeStyle(
+        alive && hs.tauntTurns > 0 ? 6 : 3,
+        alive && hs.tauntTurns > 0 ? 0x3d7dd9 : 0x0d1b2e
+      );
 
       const hpRatio = Phaser.Math.Clamp(hs.hp / hs.hero.maxHp, 0, 1);
       view.hpBarFill.setSize(60 * hpRatio, 8);
@@ -601,42 +620,8 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
-  /** DOM-оверлей с логом: текст выделяется и копируется (Phaser-текст скопировать нельзя). */
   private showLogOverlay(): void {
-    const existing = document.getElementById('battle-log-overlay');
-    if (existing) {
-      existing.remove();
-      return;
-    }
-    const wrap = document.createElement('div');
-    wrap.id = 'battle-log-overlay';
-    wrap.style.cssText =
-      'position:fixed;inset:0;background:rgba(13,27,46,.97);z-index:1000;display:flex;flex-direction:column;padding:12px;gap:8px;';
-    const ta = document.createElement('textarea');
-    ta.value = this.state.log.join('\n');
-    ta.readOnly = true;
-    ta.style.cssText =
-      'flex:1;background:#0d1b2e;color:#cfe0f4;font:12px/1.5 monospace;border:1px solid #d9a94a;border-radius:6px;padding:8px;white-space:pre;overflow:auto;';
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:8px;';
-    const copyBtn = document.createElement('button');
-    copyBtn.textContent = 'Скопировать';
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = 'Закрыть';
-    for (const b of [copyBtn, closeBtn]) {
-      b.style.cssText = 'flex:1;padding:14px;background:#d9a94a;color:#0d1b2e;border:0;border-radius:6px;font-size:16px;';
-    }
-    copyBtn.onclick = () => {
-      ta.select();
-      navigator.clipboard?.writeText(ta.value).then(
-        () => (copyBtn.textContent = 'Скопировано!'),
-        () => document.execCommand('copy')
-      );
-    };
-    closeBtn.onclick = () => wrap.remove();
-    row.append(copyBtn, closeBtn);
-    wrap.append(ta, row);
-    document.body.append(wrap);
+    showTextOverlay(this.state.log.join('\n'));
   }
 
   private showResultOverlay(status: BattleState['status']): void {

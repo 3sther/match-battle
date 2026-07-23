@@ -1,7 +1,7 @@
 // Жадный AI: перебор доступных цепочек на доске, выбор по длине (уровень 1) или по
 // полезности (уровень 2). Используется и симулятором баланса, и (позже) PvE-ботом клиента.
 
-import { capChain, getConnectedComponents } from './board';
+import { buildPathChain, getConnectedComponents } from './board';
 import { chainLengthMultiplier } from './config';
 import { computeSwordDamage } from './combat';
 import type { Board, Chain, TeamState } from './types';
@@ -74,8 +74,10 @@ function pickByUtility(chains: Chain[], actingTeam: TeamState, defendingTeam: Te
 
 /** Решение AI на один ход. null, если на доске нет ни одной матчнутой цепочки (крайний случай). */
 export function decideTurn(board: Board, actingTeam: TeamState, defendingTeam: TeamState, level: AiLevel): AiDecision | null {
-  // Кап длины - правило игры: AI играет теми же цепочками, что доступны пальцу игрока.
-  const chains = getConnectedComponents(board).map((c) => capChain(board, c));
+  // AI играет ЧЕСТНЫМИ пальце-цепочками: последовательный путь, как протянул бы игрок.
+  const chains = getConnectedComponents(board)
+    .map((c) => buildPathChain(board, c))
+    .filter((c) => c.cells.length >= 3);
   if (chains.length === 0) return null;
 
   const focusTargetId = pickFocusTarget(defendingTeam);

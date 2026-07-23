@@ -97,6 +97,45 @@ export function capChain(board: Board, chain: Chain, maxLength: number = MAX_CHA
 }
 
 /**
+ * Превращает компонент связности в ЧЕСТНУЮ пальце-цепочку: последовательный путь, где каждая
+ * клетка соседствует с предыдущей (8 направлений) - ровно то, что может протянуть игрок.
+ * Жадный обход с эвристикой Warnsdorff (шаг в соседа с минимальным числом продолжений),
+ * несколько стартов, берётся длиннейший путь до maxLength. Без этого AI играл связными
+ * МНОЖЕСТВАМИ клеток, недостижимыми для пальца, - нечестное преимущество и рваная анимация.
+ */
+export function buildPathChain(board: Board, component: Chain, maxLength: number = MAX_CHAIN_LENGTH): Chain {
+  const key = (p: Position) => p.row * board.size + p.col;
+  const inComponent = new Set(component.cells.map(key));
+  const freeDegree = (p: Position, visited: Set<number>) =>
+    neighbors8(board, p).filter((n) => inComponent.has(key(n)) && !visited.has(key(n))).length;
+
+  let best: Position[] = [];
+  // Старты - клетки с минимальной степенью (концы «отростков»), плюс не более 4 попыток.
+  const starts = [...component.cells]
+    .sort((a, b) => freeDegree(a, new Set()) - freeDegree(b, new Set()))
+    .slice(0, 4);
+
+  for (const start of starts) {
+    const visited = new Set<number>([key(start)]);
+    const path: Position[] = [start];
+    let cur = start;
+    while (path.length < maxLength) {
+      const nexts = neighbors8(board, cur).filter((n) => inComponent.has(key(n)) && !visited.has(key(n)));
+      if (nexts.length === 0) break;
+      nexts.sort((a, b) => freeDegree(a, visited) - freeDegree(b, visited));
+      cur = nexts[0];
+      visited.add(key(cur));
+      path.push(cur);
+    }
+    if (path.length > best.length) best = path;
+    if (best.length >= maxLength) break;
+  }
+
+  const includesAbilityTile = best.some((pos) => board.grid[pos.row][pos.col].type === 'ability');
+  return { cells: best, effectiveType: component.effectiveType, includesAbilityTile };
+}
+
+/**
  * Резолвит одну цепочку: очищает клетки, гравитация внутри затронутых колонок, рефилл
  * через RNG. Если длина цепочки >= ABILITY_TILE_CHAIN_LENGTH - в один из освободившихся
  * столбцов (верхняя клетка) кладётся ability-тайл вместо случайного.

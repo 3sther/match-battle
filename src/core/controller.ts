@@ -245,6 +245,7 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   events.push(...diffTeamEvents('A', beforeA, state.teamA, decision.ultimateCasterId));
   events.push(...diffTeamEvents('B', beforeB, state.teamB, decision.ultimateCasterId));
 
+  const taunter = defendingTeam.heroes.find((h) => h.hp > 0 && h.tauntTurns > 0);
   state.log.push(
     `--- Действие ${state.turns} | ходит ${acting} | множитель урона ${damageMult.toFixed(2)}` +
       (Math.round(shieldBeforeDecay) > 0
@@ -253,6 +254,9 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
     `  цепочка ${decision.chain.effectiveType} x${decision.chain.cells.length}` +
       `${decision.chain.includesAbilityTile ? ' +звезда' : ''}` +
       `${decision.focusTargetId ? ` | фокус ${decision.focusTargetId}` : ''}`,
+    ...(decision.chain.effectiveType === 'sword' && taunter && decision.focusTargetId !== taunter.hero.id
+      ? [`  (провокация: удар перехватил ${taunter.hero.id})`]
+      : []),
     ...fmtEvents(events)
   );
 
