@@ -34,6 +34,8 @@ export interface TurnDecision {
   ultimateCasterId?: string;
   chain: Chain;
   focusTargetId?: string;
+  /** Ведущий атаки под меч-цепочку (см. combat.ts resolveStriker). Без него - дефолт по цели. */
+  strikerId?: string;
 }
 
 /** Применяет решение хода: ульта (если есть, до цепочки - design), затем резолв доски + эффект цепочки. */
@@ -51,5 +53,5 @@ export function applyTurnDecision(
     if (caster) castUltimate(caster, actingTeam, defendingTeam, decision.focusTargetId, damageMult, defenseMult);
   }
   resolveChain(board, decision.chain, rng);
-  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, damageMult, defenseMult);
+  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, decision.strikerId, damageMult, defenseMult);
 }

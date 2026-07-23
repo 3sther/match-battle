@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import {
   canExtendChain,
+  convertTile,
   createBattle,
   defaultFocusTarget,
   getValidChainFromPath,
@@ -11,7 +12,7 @@ import {
   type BattleState,
 } from '../core/controller';
 import { decideTurn, type AiLevel } from '../core/ai';
-import { previewChainEffect } from '../core/combat';
+import { previewChainEffect, resolveStriker } from '../core/combat';
 import { computeDamageMult, computeDefenseMult } from '../core/turn';
 import { MAX_CHAIN_LENGTH } from '../core/config';
 import type { Chain, CombatTileType, Faction, Hero, HeroState, Position, TileType } from '../core/types';
@@ -20,7 +21,8 @@ import { showTextOverlay } from './logOverlay';
 
 const CELL_SIZE = 76;
 const BOARD_PX = CELL_SIZE * 7;
-const AI_LEVEL: AiLevel = 2;
+/** Задержка удержания пальца, после которой тап считается долгим (панель героя / конвертация Ци). */
+const LONG_PRESS_MS = 400;
 
 const FACTION_COLOR: Record<Faction, number> = {
   fire: 0xd94a3d,
@@ -30,12 +32,15 @@ const FACTION_COLOR: Record<Faction, number> = {
   yang: 0xd9a94a,
 };
 const ROLE_LETTER: Record<Hero['role'], string> = { tank: 'Т', dd: 'Д', support: 'С', hybrid: 'Г' };
+const FACTION_NAME_RU: Record<Faction, string> = { fire: 'Огонь', wood: 'Дерево', water: 'Вода', yin: 'Инь', yang: 'Ян' };
+const ROLE_NAME_RU: Record<Hero['role'], string> = { tank: 'Танк', dd: 'ДД', support: 'Саппорт', hybrid: 'Гибрид' };
 const DEAD_COLOR = 0x4a4a4a;
 
 interface BattleInitData {
   heroesA: Hero[];
   heroesB: Hero[];
   seed: number;
+  aiLevel: AiLevel;
 }
 
 /** Экранное представление одного героя: портрет + HP-бар + шкала ульты. */
@@ -78,23 +83,39 @@ export class BattleScene extends Phaser.Scene {
   private teamBShieldBarBg!: Phaser.GameObjects.Rectangle;
 
   private focusTargetId?: string;
+  /** Ведущий атаки (striker) под меч-цепочку - назначается тапом по своему герою, см. combat.ts resolveStriker. */
+  private leaderId?: string;
   /** Для двойного тапа по своему герою (каст ульты). */
   private lastOwnTapHeroId?: string;
   private lastOwnTapTime = 0;
+  private aiLevel: AiLevel = 2;
+
+  /** Долгий тап по портрету - панель героя (не путать с обычным тапом - фокус/ведущий/ульта). */
+  private heroPanel?: Phaser.GameObjects.Container;
+  private portraitLongPressTimer?: Phaser.Time.TimerEvent;
+  private portraitLongPressFired = false;
+
+  /** Долгий тап по фишке доски при qi>0 - конвертация типа клетки (см. controller.ts convertTile). */
+  private qiText!: Phaser.GameObjects.Text;
+  private tileLongPressTimer?: Phaser.Time.TimerEvent;
+  private tileLongPressFired = false;
 
   constructor() {
     super('Battle');
   }
 
   create(data: BattleInitData): void {
+    this.aiLevel = data.aiLevel ?? 2;
     // Соло-режим: первым ходит AI (сторона B) - «монетка» первого действия ложится на него,
     // а цепочки игрока всегда бьют в полную силу (по плейтесту ослабленный первый ход игрока
     // ощущался как несправедливость, хотя статистически был честен).
-    this.state = createBattle(data.heroesA, data.heroesB, data.seed, { firstActing: 'B' });
+    this.state = createBattle(data.heroesA, data.heroesB, data.seed, { firstActing: 'B', aiLevel: this.aiLevel });
     this.locked = false;
     this.focusTargetId = undefined;
+    this.leaderId = undefined;
     this.lastOwnTapHeroId = undefined;
     this.portraits = [];
+    this.heroPanel = undefined;
 
     this.selectionGraphics = this.add.graphics();
     this.aiHighlightGraphics = this.add.graphics();
@@ -104,6 +125,11 @@ export class BattleScene extends Phaser.Scene {
       .setOrigin(0.5, 1)
       .setDepth(20)
       .setVisible(false);
+    // Счётчик Ци игрока - виден всегда над доской.
+    this.qiText = this.add
+      .text(0, 0, '', { fontFamily: 'sans-serif', fontSize: '20px', color: '#d9a94a' })
+      .setOrigin(0, 1)
+      .setDepth(15);
 
     this.createBoardGraphics();
     this.createPortraits('B', this.state.teamB.heroes); // враги сверху
@@ -168,6 +194,8 @@ export class BattleScene extends Phaser.Scene {
     this.teamAShieldBarBg.setSize(BOARD_PX * 0.6, 8);
     this.teamAShieldBar.setPosition(w / 2 - (BOARD_PX * 0.6) / 2, ownY - 62);
 
+    this.qiText.setPosition(this.boardOriginX, this.boardOriginY - 6);
+
     for (let row = 0; row < 7; row++) {
       for (let col = 0; col < 7; col++) {
         this.tileGraphics[row][col].setPosition(this.cellCenter({ row, col }).x, this.cellCenter({ row, col }).y);
@@ -220,8 +248,36 @@ export class BattleScene extends Phaser.Scene {
       this.portraits.push(view);
 
       circle.setInteractive({ useHandCursor: true });
-      circle.on('pointerdown', () => this.onPortraitTap(view));
+      circle.on('pointerdown', () => this.onPortraitPointerDown(view));
+      circle.on('pointerup', () => this.onPortraitPointerUp(view));
+      circle.on('pointerupoutside', () => this.onPortraitPointerCancel());
     }
+  }
+
+  /** Удержание пальца >=400мс на ЛЮБОМ портрете - панель героя (см. showHeroPanel), не тап. */
+  private onPortraitPointerDown(view: PortraitView): void {
+    this.portraitLongPressFired = false;
+    this.portraitLongPressTimer = this.time.delayedCall(LONG_PRESS_MS, () => {
+      this.portraitLongPressFired = true;
+      this.showHeroPanel(view);
+    });
+  }
+
+  private onPortraitPointerUp(view: PortraitView): void {
+    this.portraitLongPressTimer?.remove();
+    this.portraitLongPressTimer = undefined;
+    if (this.portraitLongPressFired) {
+      this.hideHeroPanel();
+      this.portraitLongPressFired = false;
+      return; // долгий тап уже показал панель - обычный тап (фокус/ведущий/ульта) не запускаем
+    }
+    this.onPortraitTap(view);
+  }
+
+  private onPortraitPointerCancel(): void {
+    this.portraitLongPressTimer?.remove();
+    this.portraitLongPressTimer = undefined;
+    this.portraitLongPressFired = false;
   }
 
   private onPortraitTap(view: PortraitView): void {
@@ -233,11 +289,21 @@ export class BattleScene extends Phaser.Scene {
       this.refreshHud();
       return;
     }
-    // Своя команда: ДВОЙНОЙ тап по герою с зарядом >=100% кастует ульту немедленно, вне
-    // цепочки. Ход при этом не тратится - после ульты игрок рисует цепочку как обычно.
+    // Своя команда: тап ВСЕГДА назначает ведущего атаки (см. combat.ts resolveStriker) - и
+    // без заряда ульты тоже, чтобы игрок мог выбрать ведущего под стихию цели заранее.
+    // ДВОЙНОЙ тап по герою с зарядом >=100% дополнительно кастует ульту немедленно, вне
+    // цепочки - ход не тратится. Первый тап и выбирает ведущего, и взводит окно двойного тапа.
     if (this.state.acting !== 'A') return;
     const hs = this.state.teamA.heroes.find((h) => h.hero.id === view.heroId);
-    if (!hs || hs.hp <= 0 || hs.charge < 1) return;
+    if (!hs || hs.hp <= 0) return;
+
+    this.leaderId = view.heroId;
+    this.refreshHud();
+
+    if (hs.charge < 1) {
+      this.lastOwnTapHeroId = undefined; // герой без заряда - окно двойного тапа не взводим
+      return;
+    }
 
     const now = this.time.now;
     if (this.lastOwnTapHeroId === view.heroId && now - this.lastOwnTapTime < 600) {
@@ -265,6 +331,39 @@ export class BattleScene extends Phaser.Scene {
       this.state.teamA.heroes.find((h) => h.hero.id === heroId)?.hero ??
       this.state.teamB.heroes.find((h) => h.hero.id === heroId)?.hero
     );
+  }
+
+  /** Панель героя (долгий тап на портрете): имя/id, стихия, роль, HP, atk/def, заряд ульты, щит команды. */
+  private showHeroPanel(view: PortraitView): void {
+    this.hideHeroPanel();
+    const team = view.side === 'A' ? this.state.teamA : this.state.teamB;
+    const hs = team.heroes.find((h) => h.hero.id === view.heroId);
+    if (!hs) return;
+
+    const lines = [
+      `${hs.hero.name} (${hs.hero.id})`,
+      `${FACTION_NAME_RU[hs.hero.faction]} · ${ROLE_NAME_RU[hs.hero.role]}`,
+      `HP: ${Math.round(Math.max(0, hs.hp))}/${hs.hero.maxHp}`,
+      `atk ${hs.hero.atk} / def ${hs.hero.def}`,
+      `заряд ульты: ${Math.round(hs.charge * 100)}%`,
+      `щит команды: ${Math.round(team.shield)}`,
+    ];
+    if (hs.tauntTurns > 0) lines.push('провокация активна');
+
+    const width = 260;
+    const height = 24 * lines.length + 24;
+    const bg = this.add.rectangle(0, 0, width, height, 0x0d1b2e, 0.95).setStrokeStyle(2, 0xd9a94a);
+    const text = this.add
+      .text(0, 0, lines.join('\n'), { fontFamily: 'sans-serif', fontSize: '16px', color: '#cfe0f4', align: 'left', lineSpacing: 6 })
+      .setOrigin(0.5);
+    const x = Phaser.Math.Clamp(view.x, width / 2 + 8, this.scale.width - width / 2 - 8);
+    const y = view.side === 'B' ? view.y + 90 : view.y - 90;
+    this.heroPanel = this.add.container(x, y, [bg, text]).setDepth(28);
+  }
+
+  private hideHeroPanel(): void {
+    this.heroPanel?.destroy();
+    this.heroPanel = undefined;
   }
 
   // ---------------------------------------------------------------------------------------
@@ -358,6 +457,19 @@ export class BattleScene extends Phaser.Scene {
     this.dragging = true;
     this.dragPath = [cell];
     this.redrawSelection();
+
+    // Долгий тап на одной клетке при qi>0 - конвертация типа клетки (тратит 1 Ци, ход не тратится).
+    // Отдельный от drag-and-connect путь: короткий тап на одной клетке и так не даёт цепочку
+    // (длина < 3), так что удержание здесь не конфликтует с рисованием цепочки.
+    this.tileLongPressFired = false;
+    if (this.state.qi.A > 0) {
+      this.tileLongPressTimer = this.time.delayedCall(LONG_PRESS_MS, () => {
+        if (this.dragPath.length === 1 && this.dragPath[0].row === cell.row && this.dragPath[0].col === cell.col) {
+          this.tileLongPressFired = true;
+          this.convertTileAt(cell);
+        }
+      });
+    }
   }
 
   private onPointerMove(p: Phaser.Input.Pointer): void {
@@ -377,16 +489,43 @@ export class BattleScene extends Phaser.Scene {
     if (this.dragPath.length < MAX_CHAIN_LENGTH && canExtendChain(this.state.board, this.dragPath, cell)) {
       this.dragPath.push(cell);
       this.redrawSelection();
+      this.tileLongPressTimer?.remove(); // палец пополз дальше - это цепочка, не удержание
+      this.tileLongPressTimer = undefined;
     }
   }
 
   private onPointerUp(_p: Phaser.Input.Pointer): void {
+    this.tileLongPressTimer?.remove();
+    this.tileLongPressTimer = undefined;
     if (!this.dragging) return;
     this.dragging = false;
+    if (this.tileLongPressFired) {
+      this.dragPath = [];
+      this.redrawSelection();
+      return; // долгий тап уже конвертировал клетку - не пытаемся собрать из неё цепочку
+    }
     const chain = getValidChainFromPath(this.state.board, this.dragPath);
     this.dragPath = [];
     this.redrawSelection();
     if (chain) this.commitPlayerAction(chain);
+  }
+
+  /** Тратит 1 Ци на конвертацию типа клетки (см. controller.ts convertTile). Ход не тратится. */
+  private convertTileAt(pos: Position): void {
+    this.dragging = false;
+    this.dragPath = [];
+    this.redrawSelection();
+    const result = convertTile(this.state, 'A', pos);
+    if (!result) return;
+    this.redrawBoard();
+    this.refreshHud();
+    this.flashTileConvert(pos);
+  }
+
+  private flashTileConvert(pos: Position): void {
+    const c = this.cellCenter(pos);
+    const flash = this.add.circle(c.x, c.y, CELL_SIZE * 0.45, 0xd9a94a, 0.7);
+    this.tweens.add({ targets: flash, alpha: 0, scale: 1.6, duration: 350, onComplete: () => flash.destroy() });
   }
 
   private redrawSelection(): void {
@@ -412,7 +551,7 @@ export class BattleScene extends Phaser.Scene {
       return;
     }
     const focus = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
-    this.showChainNumber('A', baseType, this.dragPath.length, focus);
+    this.showChainNumber('A', baseType, this.dragPath.length, focus, this.leaderId);
   }
 
   // ---------------------------------------------------------------------------------------
@@ -423,7 +562,7 @@ export class BattleScene extends Phaser.Scene {
     this.locked = true;
     const focusTargetId = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
 
-    const result = playAction(this.state, { chain, focusTargetId });
+    const result = playAction(this.state, { chain, focusTargetId, strikerId: this.leaderId });
     this.redrawBoard();
     this.playEvents(result.events);
     this.refreshHud();
@@ -435,10 +574,10 @@ export class BattleScene extends Phaser.Scene {
   private runAiTurn(): void {
     // Превью решения AI (decideTurn - чистая функция, состояние между превью и применением
     // не меняется). Применяет ход playAiAction - как и требует DESIGN.md.
-    const decision = decideTurn(this.state.board, this.state.teamB, this.state.teamA, AI_LEVEL);
+    const decision = decideTurn(this.state.board, this.state.teamB, this.state.teamA, this.aiLevel);
     if (!decision) {
       // На доске нет ни одной матчнутой цепочки для AI (крайний случай) - playAiAction пропустит ход.
-      const result = playAiAction(this.state, AI_LEVEL);
+      const result = playAiAction(this.state, this.aiLevel);
       this.refreshHud();
       this.locked = false;
       this.finishIfGameOver(result.status);
@@ -452,7 +591,7 @@ export class BattleScene extends Phaser.Scene {
       this.time.delayedCall(1000, () => {
         this.aiHighlightGraphics.clear();
         this.dragLabel.setVisible(false);
-        const result = playAiAction(this.state, AI_LEVEL);
+        const result = playAiAction(this.state, this.aiLevel);
         this.redrawBoard();
         this.playEvents(result.events);
         this.refreshHud();
@@ -483,8 +622,9 @@ export class BattleScene extends Phaser.Scene {
     drawStep();
   }
 
-  /** Число-прогноз эффекта цепочки над доской - общее для протяжки игрока и превью AI. */
-  private showChainNumber(side: 'A' | 'B', type: CombatTileType, length: number, focusTargetId?: string): void {
+  /** Число-прогноз эффекта цепочки над доской - общее для протяжки игрока и превью AI.
+   * strikerId - ведущий атаки под меч-цепочку (без него - дефолт по цели, см. resolveStriker). */
+  private showChainNumber(side: 'A' | 'B', type: CombatTileType, length: number, focusTargetId?: string, strikerId?: string): void {
     if (length < 3) {
       this.dragLabel.setVisible(false);
       return;
@@ -493,7 +633,7 @@ export class BattleScene extends Phaser.Scene {
     const defendingTeam = side === 'A' ? this.state.teamB : this.state.teamA;
     const damageMult = computeDamageMult(this.state.turns + 1, this.state.firstActionDamageMult);
     const defenseMult = computeDefenseMult(this.state.turns + 1);
-    const amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId, damageMult, defenseMult);
+    const amount = previewChainEffect(actingTeam, defendingTeam, type, length, focusTargetId, strikerId, damageMult, defenseMult);
     const colors: Record<CombatTileType, string> = { sword: '#e08a3d', heart: '#4caf50', shield: '#3d7dd9' };
     this.dragLabel.setPosition(this.boardOriginX + BOARD_PX / 2, this.boardOriginY - 12);
     this.dragLabel.setText(`${side === 'B' ? 'AI: ' : ''}${Math.round(amount)}`);
@@ -562,8 +702,19 @@ export class BattleScene extends Phaser.Scene {
   // HUD (HP/заряд/щит/фокус-рамка) - полный ресинк с состоянием боя
   // ---------------------------------------------------------------------------------------
 
+  /** Ведущий атаки команды A прямо сейчас: явный выбор игрока (leaderId) или дефолт по текущей
+   * фокус-цели (см. combat.ts resolveStriker) - для золотой рамки и превью числа. */
+  private effectiveStrikerId(): string | undefined {
+    const focusId = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
+    const target = this.state.teamB.heroes.find((h) => h.hero.id === focusId && h.hp > 0);
+    if (!target) return undefined;
+    return resolveStriker(this.state.teamA, target, this.leaderId)?.hero.id;
+  }
+
   private refreshHud(): void {
     const effectiveFocus = this.focusTargetId ?? defaultFocusTarget(this.state.teamB);
+    const effectiveLeader = this.effectiveStrikerId();
+    this.qiText.setText(`Ци: ${this.state.qi.A}`);
 
     for (const view of this.portraits) {
       const team = view.side === 'A' ? this.state.teamA : this.state.teamB;
@@ -593,8 +744,10 @@ export class BattleScene extends Phaser.Scene {
         view.circle.setScale(1);
       }
 
-      // Золотая рамка фокус-цели - только у врагов.
+      // Золотая рамка: фокус-цель у врагов, ведущий атаки (striker) у своей команды.
       if (view.side === 'B' && alive && view.heroId === effectiveFocus) {
+        view.focusRing.setStrokeStyle(4, 0xd9a94a, 1);
+      } else if (view.side === 'A' && alive && view.heroId === effectiveLeader) {
         view.focusRing.setStrokeStyle(4, 0xd9a94a, 1);
       } else {
         view.focusRing.setStrokeStyle(4, 0xd9a94a, 0);
@@ -659,7 +812,7 @@ export class BattleScene extends Phaser.Scene {
     retryBtn.on('pointerdown', () => {
       const seed = Date.now();
       const { teamA, teamB } = pickRandomTeams(seed);
-      this.scene.restart({ heroesA: teamA, heroesB: teamB, seed });
+      this.scene.restart({ heroesA: teamA, heroesB: teamB, seed, aiLevel: this.aiLevel });
     });
     homeBtn.on('pointerdown', () => this.scene.start('Home'));
   }

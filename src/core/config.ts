@@ -39,8 +39,20 @@ export function defenseLengthMultiplier(length: number): number {
  */
 export const DEF_REDUCTION_DENOMINATOR = 300;
 export const MAX_DEF_REDUCTION = 0.6;
-/** Меч: множитель силы атаки. Итог = sumAtk(с фракц. бонусом) × SWORD_POWER × swordMult × (1−reduction). */
-export const SWORD_POWER = 1.8;
+/**
+ * Меч: множитель силы атаки ведущего (striker - см. ниже). Итог = striker.atk × фракц. бонус
+ * ведущего × SWORD_POWER × swordMult × (1−reduction) × (1 + ASSIST_DAMAGE_BONUS × союзники).
+ */
+export const SWORD_POWER = 2.6;
+
+/**
+ * «Ведущий атаки» (striker, решение Igor 2026-07-24): меч-цепочка бьёт ТОЛЬКО от одного героя
+ * команды - консистентно с ультами (тоже бьёт один герой), а не размазанной суммой atk всей
+ * команды. Каждый живой союзник (кроме ведущего) даёт баф +ASSIST_DAMAGE_BONUS урона - тактика
+ * "разгонять" сильного дд подсветкой, а не растворять его в среднем. Смерть ведущего реально
+ * проседает урон команды; выбор ведущего под стихию цели - тактическое решение игрока/AI.
+ */
+export const ASSIST_DAMAGE_BONUS = 0.15;
 
 /**
  * Правило «нет ваншотов»: один удар (меч-цепочка или dd-ульта) не может снять больше этой
@@ -125,5 +137,8 @@ export const FIRST_ACTION_DAMAGE_MULT = 0.3;
  * HS Fatigue - бить надо в причину столла, то есть в перелечивание, а не раздувать урон).
  * После FATIGUE_START_TURN входящий хил и прирост щита тают на DECAY за ход, до нуля.
  */
-export const FATIGUE_START_TURN = 30;
+export const FATIGUE_START_TURN = 20;
 export const FATIGUE_DECAY_PER_TURN = 0.1;
+
+/** Ци (валюта за длинные цепочки): цепочка длиной >= этого числа даёт действующей стороне +1 Ци. */
+export const QI_CHAIN_LENGTH = 12;

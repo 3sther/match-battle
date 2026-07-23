@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   canExtendChain,
+  convertTile,
   createBattle,
   getValidChainFromPath,
   playAction,
   playAiAction,
 } from '../controller';
-import { SHIELD_RETENTION_PER_TURN } from '../config';
+import { QI_CHAIN_LENGTH, SHIELD_RETENTION_PER_TURN } from '../config';
 import type { Board, Chain, Hero, Position, TileType } from '../types';
 
 function makeHero(id: string, overrides: Partial<Hero> = {}): Hero {
@@ -192,5 +193,60 @@ describe('BattleController - монетка и распад щита', () => {
     // Состав команды не менялся -> прирост щита за одинаковую цепочку одинаков.
     const expected = shieldAfterFirstA * SHIELD_RETENTION_PER_TURN + shieldAfterFirstA;
     expect(state.teamA.shield).toBeCloseTo(expected, 5);
+  });
+});
+
+describe('Ци - валюта за длинные цепочки', () => {
+  it('цепочка длиной >= QI_CHAIN_LENGTH даёт действующей стороне +1 Ци', () => {
+    const state = createBattle(team3('a'), team3('b'), 5);
+    const chain: Chain = { cells: snakePath(QI_CHAIN_LENGTH), effectiveType: 'shield', includesAbilityTile: false };
+    expect(state.qi.A).toBe(0);
+    playAction(state, { chain });
+    expect(state.qi.A).toBe(1);
+  });
+
+  it('цепочка короче QI_CHAIN_LENGTH не даёт Ци', () => {
+    const state = createBattle(team3('a'), team3('b'), 5);
+    const chain: Chain = { cells: snakePath(QI_CHAIN_LENGTH - 1), effectiveType: 'shield', includesAbilityTile: false };
+    playAction(state, { chain });
+    expect(state.qi.A).toBe(0);
+  });
+});
+
+describe('convertTile - конвертация клетки за Ци', () => {
+  it('меняет тип клетки на другой боевой тип, тратит 1 Ци, ход НЕ тратится', () => {
+    const state = createBattle(team3('a'), team3('b'), 5);
+    state.qi.A = 1;
+    const pos: Position = { row: 0, col: 0 };
+    const before = state.board.grid[pos.row][pos.col].type;
+    const turnsBefore = state.turns;
+
+    const next = convertTile(state, 'A', pos);
+
+    expect(next).not.toBeNull();
+    expect(next).not.toBe(before);
+    expect(state.board.grid[pos.row][pos.col].type).toBe(next);
+    expect(state.qi.A).toBe(0);
+    expect(state.turns).toBe(turnsBefore);
+  });
+
+  it('отклоняет конвертацию при qi=0', () => {
+    const state = createBattle(team3('a'), team3('b'), 5);
+    expect(state.qi.A).toBe(0);
+    expect(convertTile(state, 'A', { row: 0, col: 0 })).toBeNull();
+  });
+
+  it('не трогает ability-тайл', () => {
+    const state = createBattle(team3('a'), team3('b'), 5);
+    state.qi.A = 5;
+    state.board.grid[0][0] = { type: 'ability' };
+    expect(convertTile(state, 'A', { row: 0, col: 0 })).toBeNull();
+    expect(state.qi.A).toBe(5); // отклонённая попытка не тратит Ци
+  });
+
+  it('отклоняет конвертацию не в свой ход', () => {
+    const state = createBattle(team3('a'), team3('b'), 5); // acting='A' по умолчанию
+    state.qi.B = 1;
+    expect(convertTile(state, 'B', { row: 0, col: 0 })).toBeNull();
   });
 });

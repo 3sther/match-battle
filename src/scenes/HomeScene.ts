@@ -1,8 +1,25 @@
 import Phaser from 'phaser';
 import { createRng } from '../core/rng';
 import { generateRoster } from '../../sim/roster';
+import type { AiLevel } from '../core/ai';
 import type { Hero } from '../core/types';
 import { getSavedLogsText, showTextOverlay } from './logOverlay';
+
+const AI_LEVEL_STORAGE_KEY = 'mb_ai_level';
+
+/** Сложность AI, запомненная в localStorage (по умолчанию СРЕДНИЙ). */
+function loadAiLevel(): AiLevel {
+  const raw = Number(localStorage.getItem(AI_LEVEL_STORAGE_KEY));
+  return raw === 1 || raw === 3 ? raw : 2;
+}
+
+function saveAiLevel(level: AiLevel): void {
+  try {
+    localStorage.setItem(AI_LEVEL_STORAGE_KEY, String(level));
+  } catch {
+    // localStorage может быть недоступен (приватный режим) - выбор просто не переживёт перезапуск
+  }
+}
 
 /** Случайно перемешивает тестовый ростер (Фишер-Йетс на сидированном RNG) и режет на 2 команды 3v3. */
 export function pickRandomTeams(seed: number): { teamA: Hero[]; teamB: Hero[] } {
@@ -28,15 +45,40 @@ export class HomeScene extends Phaser.Scene {
   private title!: Phaser.GameObjects.Text;
   private startBtn!: Phaser.GameObjects.Text;
   private fullscreenInfo!: Phaser.GameObjects.Text;
+  private aiLevel: AiLevel = 2;
+  private levelButtons: Array<{ level: AiLevel; text: Phaser.GameObjects.Text }> = [];
 
   constructor() {
     super('Home');
   }
 
   create(): void {
+    this.aiLevel = loadAiLevel();
+
     this.title = this.add
       .text(0, 0, 'MATCH BATTLE', { fontFamily: 'Georgia, serif', fontSize: '64px', color: '#d9a94a' })
       .setOrigin(0.5);
+
+    const levelLabels: Array<[AiLevel, string]> = [
+      [1, 'ЛЁГКИЙ'],
+      [2, 'СРЕДНИЙ'],
+      [3, 'СЛОЖНЫЙ'],
+    ];
+    this.levelButtons = levelLabels.map(([level, label]) => {
+      const text = this.add
+        .text(0, 0, label, {
+          fontFamily: 'sans-serif', fontSize: '22px', color: '#9db4d0', backgroundColor: '#1a2b45', padding: { x: 18, y: 10 },
+        })
+        .setOrigin(0.5)
+        .setInteractive({ useHandCursor: true });
+      text.on('pointerdown', () => {
+        this.aiLevel = level;
+        saveAiLevel(level);
+        this.refreshLevelButtons();
+      });
+      return { level, text };
+    });
+    this.refreshLevelButtons();
 
     this.startBtn = this.add
       .text(0, 0, 'В БОЙ', {
@@ -52,7 +94,7 @@ export class HomeScene extends Phaser.Scene {
     this.startBtn.on('pointerdown', () => {
       const seed = Date.now();
       const { teamA, teamB } = pickRandomTeams(seed);
-      this.scene.start('Battle', { heroesA: teamA, heroesB: teamB, seed });
+      this.scene.start('Battle', { heroesA: teamA, heroesB: teamB, seed, aiLevel: this.aiLevel });
     });
 
     this.fullscreenInfo = this.add
@@ -77,8 +119,19 @@ export class HomeScene extends Phaser.Scene {
     const w = this.scale.width;
     const h = this.scale.height;
     this.title.setPosition(w / 2, h * 0.32);
+    const bx = [w / 2 - 170, w / 2, w / 2 + 170];
+    this.levelButtons.forEach((b, i) => b.text.setPosition(bx[i], h * 0.42));
     this.startBtn.setPosition(w / 2, h * 0.5);
     this.fullscreenInfo.setPosition(w / 2, h * 0.94);
+  }
+
+  /** Подсвечивает выбранную кнопку сложности золотым, остальные - приглушённым фоном. */
+  private refreshLevelButtons(): void {
+    for (const { level, text } of this.levelButtons) {
+      const selected = level === this.aiLevel;
+      text.setBackgroundColor(selected ? '#d9a94a' : '#1a2b45');
+      text.setColor(selected ? '#0d1b2e' : '#9db4d0');
+    }
   }
 
   private refreshFullscreenInfo(): void {

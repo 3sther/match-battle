@@ -34,8 +34,8 @@ describe('damageMult (разогрев затяжного боя)', () => {
     const defenderA = createTeamState([makeHero('d1')]);
     const defenderB = createTeamState([makeHero('d2')]);
 
-    applyChain(attacker(), defenderA, swordChain(3), 'd1', 1);
-    applyChain(attacker(), defenderB, swordChain(3), 'd2', 2);
+    applyChain(attacker(), defenderA, swordChain(3), 'd1', undefined, 1);
+    applyChain(attacker(), defenderB, swordChain(3), 'd2', undefined, 2);
 
     const dmgA = 1000 - defenderA.heroes[0].hp;
     const dmgB = 1000 - defenderB.heroes[0].hp;

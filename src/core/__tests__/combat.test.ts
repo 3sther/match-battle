@@ -9,6 +9,7 @@ import {
 import { simulateBattle } from '../index';
 import {
   ABILITY_TILE_CHARGE_BONUS,
+  ASSIST_DAMAGE_BONUS,
   CHARGE_OTHER_ROLE,
   CHARGE_OWN_ROLE,
   DEF_REDUCTION_DENOMINATOR,
@@ -80,6 +81,59 @@ describe('урон меч-цепочки', () => {
     const dmgCountered = computeSwordDamage(teamFire, woodTarget, 3);
     const dmgNeutral = computeSwordDamage(teamFire, neutralTarget, 3);
     expect(dmgCountered).toBeCloseTo(dmgNeutral * (1 + FACTION_COUNTER_BONUS), 5);
+  });
+});
+
+describe('ведущий атаки (striker) и бафф союзников', () => {
+  it('урон идёт только от ведущего; каждый живой союзник (кроме него) добавляет ASSIST_DAMAGE_BONUS', () => {
+    const striker = makeHero({ id: 'striker', atk: 130, faction: 'water' });
+    const ally1 = makeHero({ id: 'ally1', atk: 999, faction: 'water' }); // высокий atk - но НЕ ведущий
+    const ally2 = makeHero({ id: 'ally2', atk: 999, faction: 'water' });
+    const team = createTeamState([striker, ally1, ally2]);
+    const target = createTeamState([makeHero({ id: 'target', def: 0, faction: 'fire' })]).heroes[0];
+
+    const dmg = computeSwordDamage(team, target, 3, 'striker');
+    // striker (water) контрит цель (fire) - фракционный бонус входит в ожидаемую цифру.
+    const expected = 130 * (1 + FACTION_COUNTER_BONUS) * SWORD_POWER * swordLengthMultiplier(3) * (1 + ASSIST_DAMAGE_BONUS * 2);
+    expect(dmg).toBeCloseTo(expected, 5);
+  });
+
+  it('без явного strikerId - дефолт: макс. ОЖИДАЕМЫЙ урон по цели (герой с меньшим atk, но контрящий, обходит нейтрального с большим atk)', () => {
+    const weakCounter = makeHero({ id: 'weak-counter', atk: 100, faction: 'fire' }); // контрит wood: 100×1.2=120
+    const strongNeutral = makeHero({ id: 'strong-neutral', atk: 110, faction: 'water' }); // нейтрален: 110
+    const team = createTeamState([weakCounter, strongNeutral]);
+    const target = createTeamState([makeHero({ id: 'target', def: 0, faction: 'wood' })]).heroes[0];
+
+    const dmg = computeSwordDamage(team, target, 3);
+    const expected = 100 * (1 + FACTION_COUNTER_BONUS) * SWORD_POWER * swordLengthMultiplier(3) * (1 + ASSIST_DAMAGE_BONUS);
+    expect(dmg).toBeCloseTo(expected, 5);
+  });
+
+  it('явный strikerId перекрывает дефолт, даже если не оптимален', () => {
+    const weak = makeHero({ id: 'weak', atk: 50, faction: 'water' });
+    const strong = makeHero({ id: 'strong', atk: 200, faction: 'water' });
+    const team = createTeamState([weak, strong]);
+    const target = createTeamState([makeHero({ id: 'target', def: 0, faction: 'fire' })]).heroes[0];
+
+    const dmgDefault = computeSwordDamage(team, target, 3); // дефолт выбирает strong (макс. ожидаемый урон)
+    const dmgForced = computeSwordDamage(team, target, 3, 'weak'); // игрок явно назначил слабого ведущим
+
+    expect(dmgDefault).toBeGreaterThan(dmgForced);
+    // weak (water) тоже контрит цель (fire) - тот же фракционный бонус, ведущий лишь слабее.
+    const expectedForced = 50 * (1 + FACTION_COUNTER_BONUS) * SWORD_POWER * swordLengthMultiplier(3) * (1 + ASSIST_DAMAGE_BONUS);
+    expect(dmgForced).toBeCloseTo(expectedForced, 5);
+  });
+
+  it('смерть ведущего реально проседает урон команды (мёртвый герой не считается ни ведущим, ни ассистом)', () => {
+    const dead = makeHero({ id: 'dead', atk: 200, faction: 'fire' });
+    const alive = makeHero({ id: 'alive', atk: 80, faction: 'fire' });
+    const team = createTeamState([dead, alive]);
+    team.heroes[0].hp = 0;
+    const target = createTeamState([makeHero({ id: 'target', def: 0, faction: 'water' })]).heroes[0];
+
+    const dmg = computeSwordDamage(team, target, 3);
+    const expected = 80 * SWORD_POWER * swordLengthMultiplier(3); // только живой герой, без ассистов
+    expect(dmg).toBeCloseTo(expected, 5);
   });
 });
 

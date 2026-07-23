@@ -3,7 +3,7 @@
 // с headless-симулятором (simulateBattle в index.ts) - см. turn.ts, единая точка правды.
 
 import { createBoard, resolveChain } from './board';
-import { applyChain, castUltimate, createTeamState } from './combat';
+import { applyChain, castUltimate, createTeamState, resolveFocusTarget, resolveStriker } from './combat';
 import { createRng, type Rng } from './rng';
 import { decideTurn, type AiLevel } from './ai';
 import { computeDamageMult, computeDefenseMult, decayShield, type TurnDecision } from './turn';
@@ -11,8 +11,10 @@ import {
   FIRST_ACTION_DAMAGE_MULT,
   MAX_BATTLE_TURNS,
   MAX_CHAIN_LENGTH,
+  QI_CHAIN_LENGTH,
   SECOND_PLAYER_START_CHARGE,
   SHIELD_RETENTION_PER_TURN,
+  TILE_TYPES,
 } from './config';
 import type { Board, Chain, CombatTileType, Hero, Position, TeamState, TileType } from './types';
 
@@ -31,6 +33,8 @@ export interface BattleState {
   turns: number;
   firstActionDamageMult: number;
   status: BattleStatus;
+  /** Ци - валюта за длинные (>=QI_CHAIN_LENGTH) цепочки, тратится на convertTile. AI её не тратит. */
+  qi: { A: number; B: number };
   /** Человекочитаемый лог боя - для дебага и верификации баланса цифрами (кнопка ЛОГ в сцене). */
   log: string[];
 }
@@ -40,6 +44,8 @@ export interface CreateBattleOptions {
   firstActionDamageMult?: number;
   /** Кто ходит первым (по умолчанию A). В соло-режиме первым ходит AI - монетка ложится на него. */
   firstActing?: Side;
+  /** Только для шапки лога - сложность AI-соперника (UI-параметр, движок его не читает). */
+  aiLevel?: AiLevel;
 }
 
 /** Создаёт новый бой 3v3: доску, команды, стартовый заряд второй команды (компенсация хода). */
@@ -53,6 +59,7 @@ export function createBattle(
     secondPlayerStartCharge = SECOND_PLAYER_START_CHARGE,
     firstActionDamageMult = FIRST_ACTION_DAMAGE_MULT,
     firstActing = 'A',
+    aiLevel = 2,
   } = opts;
   const rng = createRng(seed);
   const board = createBoard(rng);
@@ -65,12 +72,23 @@ export function createBattle(
   const fmtHero = (h: Hero) =>
     `${h.id} [${h.faction}/${h.role}] hp${h.maxHp} atk${h.atk} def${h.def} ульта:${h.ultimate.type}x${h.ultimate.power}`;
   const log = [
-    `=== БОЙ: сид ${seed}, монетка ${firstActionDamageMult} (на первый ход ${firstActing}), стартовый заряд второго ${secondPlayerStartCharge}`,
+    `=== БОЙ: сид ${seed}, монетка ${firstActionDamageMult} (на первый ход ${firstActing}), стартовый заряд второго ${secondPlayerStartCharge}, сложность AI: ${aiLevel}`,
     `A (игрок): ${heroesA.map(fmtHero).join(' | ')}`,
     `B (AI):    ${heroesB.map(fmtHero).join(' | ')}`,
   ];
 
-  return { board, teamA, teamB, rng, acting: firstActing, turns: 0, firstActionDamageMult, status: 'ongoing', log };
+  return {
+    board,
+    teamA,
+    teamB,
+    rng,
+    acting: firstActing,
+    turns: 0,
+    firstActionDamageMult,
+    status: 'ongoing',
+    qi: { A: 0, B: 0 },
+    log,
+  };
 }
 
 function isAdjacent(a: Position, b: Position): boolean {
@@ -125,6 +143,27 @@ export function defaultFocusTarget(team: TeamState): string | undefined {
   const alive = team.heroes.filter((h) => h.hp > 0);
   if (alive.length === 0) return undefined;
   return alive.reduce((lowest, h) => (h.hp < lowest.hp ? h : lowest)).hero.id;
+}
+
+/**
+ * Тратит 1 Ци стороны `side`, чтобы сменить тип одной клетки доски на случайный ДРУГОЙ боевой
+ * тип (ability не трогаем и в результат не выдаём - Ци конвертирует боевые типы). Ход не
+ * тратится и очередь не передаётся - как и playUltimate. AI Ци копит, но сознательно не
+ * тратит (см. ai.ts) - конвертация только для игрока через UI.
+ */
+export function convertTile(state: BattleState, side: Side, pos: Position): TileType | null {
+  if (state.status !== 'ongoing' || state.acting !== side) return null;
+  if (state.qi[side] <= 0) return null;
+  if (!inBounds(state.board, pos)) return null;
+  const current = typeAt(state.board, pos);
+  if (current === 'ability') return null;
+
+  const options = TILE_TYPES.filter((t) => t !== current);
+  const next = options[state.rng.nextInt(options.length)];
+  state.board.grid[pos.row][pos.col] = { type: next };
+  state.qi[side]--;
+  state.log.push(`Ци: клетка (${pos.row},${pos.col}) → ${next}`);
+  return next;
 }
 
 /** Событие для анимации в сцене - playAction/playAiAction возвращают их списком за один ход. */
@@ -270,11 +309,20 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
     }
   }
 
+  // Ведущий атаки - резолвим ДО применения (иначе после урона цель могла бы умереть, и
+  // resolveFocusTarget вернул бы уже другую цель для лога, чем реально бил computeSwordDamage).
+  let strikerLogSuffix = '';
+  if (decision.chain.effectiveType === 'sword') {
+    const swordTarget = resolveFocusTarget(defendingTeam, decision.focusTargetId);
+    const striker = swordTarget ? resolveStriker(actingTeam, swordTarget, decision.strikerId) : undefined;
+    if (striker) strikerLogSuffix = ` | ведущий ${striker.hero.id}`;
+  }
+
   // Фаза 2: цепочка.
   const beforeA = snapshotTeam(state.teamA);
   const beforeB = snapshotTeam(state.teamB);
   resolveChain(state.board, decision.chain, state.rng);
-  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, damageMult, defenseMult);
+  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, decision.strikerId, damageMult, defenseMult);
   const chainEvents: BattleEvent[] = [
     { type: 'chainResolved', side: acting, chain: decision.chain },
     ...diffTeamEvents('A', beforeA, state.teamA),
@@ -284,12 +332,20 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   state.log.push(
     `  цепочка ${decision.chain.effectiveType} x${decision.chain.cells.length}` +
       `${decision.chain.includesAbilityTile ? ' +звезда' : ''}` +
-      `${decision.focusTargetId ? ` | фокус ${decision.focusTargetId}` : ''}`,
+      `${decision.focusTargetId ? ` | фокус ${decision.focusTargetId}` : ''}` +
+      strikerLogSuffix,
     ...(decision.chain.effectiveType === 'sword' && taunter && decision.focusTargetId !== taunter.hero.id
       ? [`  (провокация: удар перехватил ${taunter.hero.id})`]
       : []),
     ...fmtEvents(chainEvents)
   );
+
+  // Ци: длинная цепочка (>=QI_CHAIN_LENGTH) конвертируется в валюту для convertTile.
+  // В simulateBattle (index.ts) Ци не начисляется - симулятор её не тратит (см. ai.ts).
+  if (decision.chain.cells.length >= QI_CHAIN_LENGTH) {
+    state.qi[acting]++;
+    state.log.push(`  +1 Ци (у ${acting} теперь ${state.qi[acting]})`);
+  }
 
   state.status = computeStatus(state);
   if (state.status === 'ongoing') state.acting = acting === 'A' ? 'B' : 'A';
@@ -303,6 +359,8 @@ export interface PlayActionInput {
   /** Каст ульты ДО цепочки в этом же ходу (ход не тратится отдельно - см. DESIGN.md). */
   ultimateCasterId?: string;
   focusTargetId?: string;
+  /** Ведущий атаки под меч-цепочку (см. combat.ts resolveStriker). Без него - дефолт по цели. */
+  strikerId?: string;
 }
 
 /** Применяет ход текущей стороны (игрока или AI, если вызывается вручную с готовым решением). */
