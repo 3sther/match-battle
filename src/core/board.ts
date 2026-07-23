@@ -2,7 +2,7 @@
 // автоматически (design-решение) - resolveChain обрабатывает ровно одну цепочку за вызов,
 // вызывающий код (ai.ts / симулятор) сам решает, что делать со следующим ходом.
 
-import { ABILITY_TILE_CHAIN_LENGTH, BOARD_SIZE, TILE_TYPES } from './config';
+import { ABILITY_TILE_CHAIN_LENGTH, BOARD_SIZE, MAX_CHAIN_LENGTH, TILE_TYPES } from './config';
 import type { Rng } from './rng';
 import type { Board, Cell, Chain, ChainResolveResult, CombatTileType, Position, TileType } from './types';
 
@@ -82,6 +82,18 @@ export function getConnectedComponents(board: Board): Chain[] {
   }
 
   return chains;
+}
+
+/**
+ * Обрезает цепочку до MAX_CHAIN_LENGTH. Клетки идут в порядке обхода DFS - любой префикс
+ * связен, так что срез остаётся валидной цепочкой. Флаг ability-тайла пересчитывается
+ * по оставшимся клеткам.
+ */
+export function capChain(board: Board, chain: Chain, maxLength: number = MAX_CHAIN_LENGTH): Chain {
+  if (chain.cells.length <= maxLength) return chain;
+  const cells = chain.cells.slice(0, maxLength);
+  const includesAbilityTile = cells.some((pos) => board.grid[pos.row][pos.col].type === 'ability');
+  return { cells, effectiveType: chain.effectiveType, includesAbilityTile };
 }
 
 /**

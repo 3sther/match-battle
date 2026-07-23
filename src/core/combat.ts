@@ -109,12 +109,16 @@ function resolveFocusTarget(team: TeamState, focusTargetId?: string): HeroState 
   return team.heroes.find((h) => h.hp > 0);
 }
 
-/** Применяет боевой эффект резолвнутой цепочки (урон/хил/щит) + заряд ульт. */
+/**
+ * Применяет боевой эффект резолвнутой цепочки (урон/хил/щит) + заряд ульт.
+ * damageMult - внешний множитель урона (разогрев затяжного боя), лечение/щит не трогает.
+ */
 export function applyChain(
   actingTeam: TeamState,
   defendingTeam: TeamState,
   chain: Chain,
-  focusTargetId?: string
+  focusTargetId?: string,
+  damageMult = 1
 ): void {
   applyChainCharge(actingTeam, chain.effectiveType);
   if (chain.includesAbilityTile) applyAbilityTileBonus(actingTeam);
@@ -124,7 +128,7 @@ export function applyChain(
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
-        const dmg = computeSwordDamage(actingTeam, target, chain.cells.length);
+        const dmg = computeSwordDamage(actingTeam, target, chain.cells.length) * damageMult;
         dealDamage(defendingTeam, target, dmg);
         if (target.tauntTurns > 0) target.tauntTurns--;
       }
@@ -144,7 +148,8 @@ export function castUltimate(
   caster: HeroState,
   actingTeam: TeamState,
   defendingTeam: TeamState,
-  focusTargetId?: string
+  focusTargetId?: string,
+  damageMult = 1
 ): void {
   const overchargeExcess = Math.max(0, caster.charge - 1.0);
   const overchargeMult = 1 + OVERCHARGE_BONUS_PER_100 * overchargeExcess;
@@ -155,7 +160,7 @@ export function castUltimate(
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
       if (target) {
         const bonus = countersFaction(caster.hero.faction, target.hero.faction) ? 1 + FACTION_COUNTER_BONUS : 1;
-        const dmg = caster.hero.atk * power * bonus * overchargeMult * mitigation(target.hero.def);
+        const dmg = caster.hero.atk * power * bonus * overchargeMult * mitigation(target.hero.def) * damageMult;
         dealDamage(defendingTeam, target, dmg);
       }
       break;

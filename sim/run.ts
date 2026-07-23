@@ -2,19 +2,24 @@
 // Запуск: npx tsx sim/run.ts [--n 1000] [--seed 12345]
 
 import { simulateBattle } from '../src/core/index';
+import { FIRST_ACTION_DAMAGE_MULT, MAX_BATTLE_TURNS, SECOND_PLAYER_START_CHARGE } from '../src/core/config';
 import { createRng } from '../src/core/rng';
 import { generateRoster } from './roster';
 import type { Hero } from '../src/core/types';
 
-function parseArgs(): { n: number; seed: number } {
+function parseArgs(): { n: number; seed: number; charge: number; malus: number } {
   const args = process.argv.slice(2);
   let n = 1000;
   let seed = 12345;
+  let charge = SECOND_PLAYER_START_CHARGE;
+  let malus = FIRST_ACTION_DAMAGE_MULT;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--n') n = Number(args[++i]);
     if (args[i] === '--seed') seed = Number(args[++i]);
+    if (args[i] === '--charge') charge = Number(args[++i]);
+    if (args[i] === '--malus') malus = Number(args[++i]);
   }
-  return { n, seed };
+  return { n, seed, charge, malus };
 }
 
 /** Тянет 3 разных героев из пула без повторов (пул на команду - копия ростера). */
@@ -52,12 +57,13 @@ interface WinStat {
 }
 
 function main(): void {
-  const { n, seed } = parseArgs();
+  const { n, seed, charge, malus } = parseArgs();
   const roster = generateRoster();
   const metaRng = createRng(seed);
 
   const turnsList: number[] = [];
   let firstSideWins = 0;
+  let timeouts = 0;
   const archetypeStats = new Map<string, WinStat>();
   const heroStats = new Map<string, WinStat>();
   for (const h of roster) heroStats.set(h.id, { wins: 0, total: 0 });
@@ -67,9 +73,13 @@ function main(): void {
     const teamB = pickTeam(roster, metaRng);
     const battleSeed = seed + i * 7919 + 1; // детерминированный, но разный на каждый бой
 
-    const result = simulateBattle(teamA, teamB, battleSeed);
+    const result = simulateBattle(teamA, teamB, battleSeed, {
+      secondPlayerStartCharge: charge,
+      firstActionDamageMult: malus,
+    });
     turnsList.push(result.turns);
     if (result.winner === 'A') firstSideWins++;
+    if (result.turns >= MAX_BATTLE_TURNS) timeouts++;
 
     const sides: Array<[Hero[], 'A' | 'B']> = [
       [teamA, 'A'],
@@ -91,7 +101,8 @@ function main(): void {
   }
 
   turnsList.sort((a, b) => a - b);
-  console.log(`Боёв: ${n}, сид: ${seed}`);
+  console.log(`Боёв: ${n}, сид: ${seed}, стартовый заряд B: ${charge}, малус первого удара A: ${malus}`);
+  console.log(`Таймауты (>=${MAX_BATTLE_TURNS} ходов): ${((100 * timeouts) / n).toFixed(1)}%`);
   console.log(
     `TTK (ходы): min=${turnsList[0]} p25=${percentile(turnsList, 0.25)} median=${percentile(turnsList, 0.5)} p75=${percentile(turnsList, 0.75)} max=${turnsList[turnsList.length - 1]}`
   );
