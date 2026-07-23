@@ -114,6 +114,15 @@ export class BattleScene extends Phaser.Scene {
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => this.onPointerUp(p));
     this.scale.on('resize', () => this.layout());
 
+    // Дебаг-кнопка: полный лог боя (оверлей + копирование). Убрать/спрятать после отладки баланса.
+    this.add
+      .text(12, 12, 'ЛОГ', {
+        fontFamily: 'sans-serif', fontSize: '20px', color: '#9db4d0', backgroundColor: '#1a2b45', padding: { x: 10, y: 6 },
+      })
+      .setDepth(25)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.showLogOverlay());
+
     this.layout();
     this.redrawBoard();
     this.refreshHud();
@@ -576,8 +585,58 @@ export class BattleScene extends Phaser.Scene {
 
   private finishIfGameOver(status: BattleState['status']): boolean {
     if (status === 'ongoing') return false;
+    this.saveBattleLog();
     this.showResultOverlay(status);
     return true;
+  }
+
+  /** Последние 5 логов боёв - в localStorage (переживают перезапуск игры). */
+  private saveBattleLog(): void {
+    try {
+      const logs: Array<{ ts: string; log: string[] }> = JSON.parse(localStorage.getItem('mb_battle_logs') ?? '[]');
+      logs.push({ ts: new Date().toISOString(), log: this.state.log });
+      localStorage.setItem('mb_battle_logs', JSON.stringify(logs.slice(-5)));
+    } catch {
+      // localStorage может быть недоступен (приватный режим) - лог остаётся в памяти боя
+    }
+  }
+
+  /** DOM-оверлей с логом: текст выделяется и копируется (Phaser-текст скопировать нельзя). */
+  private showLogOverlay(): void {
+    const existing = document.getElementById('battle-log-overlay');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const wrap = document.createElement('div');
+    wrap.id = 'battle-log-overlay';
+    wrap.style.cssText =
+      'position:fixed;inset:0;background:rgba(13,27,46,.97);z-index:1000;display:flex;flex-direction:column;padding:12px;gap:8px;';
+    const ta = document.createElement('textarea');
+    ta.value = this.state.log.join('\n');
+    ta.readOnly = true;
+    ta.style.cssText =
+      'flex:1;background:#0d1b2e;color:#cfe0f4;font:12px/1.5 monospace;border:1px solid #d9a94a;border-radius:6px;padding:8px;white-space:pre;overflow:auto;';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;';
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Скопировать';
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = 'Закрыть';
+    for (const b of [copyBtn, closeBtn]) {
+      b.style.cssText = 'flex:1;padding:14px;background:#d9a94a;color:#0d1b2e;border:0;border-radius:6px;font-size:16px;';
+    }
+    copyBtn.onclick = () => {
+      ta.select();
+      navigator.clipboard?.writeText(ta.value).then(
+        () => (copyBtn.textContent = 'Скопировано!'),
+        () => document.execCommand('copy')
+      );
+    };
+    closeBtn.onclick = () => wrap.remove();
+    row.append(copyBtn, closeBtn);
+    wrap.append(ta, row);
+    document.body.append(wrap);
   }
 
   private showResultOverlay(status: BattleState['status']): void {

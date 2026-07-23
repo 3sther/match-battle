@@ -7,7 +7,13 @@ import { castUltimate, createTeamState } from './combat';
 import { createRng, type Rng } from './rng';
 import { decideTurn, type AiLevel } from './ai';
 import { applyTurnDecision, computeDamageMult, decayShield, type TurnDecision } from './turn';
-import { FIRST_ACTION_DAMAGE_MULT, MAX_BATTLE_TURNS, MAX_CHAIN_LENGTH, SECOND_PLAYER_START_CHARGE } from './config';
+import {
+  FIRST_ACTION_DAMAGE_MULT,
+  MAX_BATTLE_TURNS,
+  MAX_CHAIN_LENGTH,
+  SECOND_PLAYER_START_CHARGE,
+  SHIELD_RETENTION_PER_TURN,
+} from './config';
 import type { Board, Chain, CombatTileType, Hero, Position, TeamState, TileType } from './types';
 
 export type Side = 'A' | 'B';
@@ -25,6 +31,8 @@ export interface BattleState {
   turns: number;
   firstActionDamageMult: number;
   status: BattleStatus;
+  /** Человекочитаемый лог боя - для дебага и верификации баланса цифрами (кнопка ЛОГ в сцене). */
+  log: string[];
 }
 
 export interface CreateBattleOptions {
@@ -49,7 +57,15 @@ export function createBattle(
   const teamB = createTeamState(heroesB);
   for (const hs of teamB.heroes) hs.charge = secondPlayerStartCharge;
 
-  return { board, teamA, teamB, rng, acting: 'A', turns: 0, firstActionDamageMult, status: 'ongoing' };
+  const fmtHero = (h: Hero) =>
+    `${h.id} [${h.faction}/${h.role}] hp${h.maxHp} atk${h.atk} def${h.def} ульта:${h.ultimate.type}x${h.ultimate.power}`;
+  const log = [
+    `=== БОЙ: сид ${seed}, монетка ${firstActionDamageMult}, стартовый заряд B ${secondPlayerStartCharge}`,
+    `A (игрок): ${heroesA.map(fmtHero).join(' | ')}`,
+    `B (AI):    ${heroesB.map(fmtHero).join(' | ')}`,
+  ];
+
+  return { board, teamA, teamB, rng, acting: 'A', turns: 0, firstActionDamageMult, status: 'ongoing', log };
 }
 
 function isAdjacent(a: Position, b: Position): boolean {
@@ -159,6 +175,42 @@ function isAlive(team: TeamState): boolean {
   return team.heroes.some((h) => h.hp > 0);
 }
 
+/** Переводит события хода в строки лога (округлённые числа, компактно). */
+function fmtEvents(events: BattleEvent[]): string[] {
+  const lines: string[] = [];
+  const charges: string[] = [];
+  for (const ev of events) {
+    switch (ev.type) {
+      case 'ultimateCast':
+        lines.push(`  УЛЬТА ${ev.side}:${ev.heroId}`);
+        break;
+      case 'chainResolved':
+        break; // цепочка логируется отдельной строкой с контекстом
+      case 'damage':
+        lines.push(`  урон ${Math.round(ev.amount)} → ${ev.side}:${ev.heroId}`);
+        break;
+      case 'heal':
+        lines.push(`  хил +${Math.round(ev.amount)} → ${ev.side}:${ev.heroId}`);
+        break;
+      case 'shield':
+        lines.push(
+          ev.amount > 0
+            ? `  щит ${ev.side} +${Math.round(ev.amount)}`
+            : `  щит ${ev.side} ${Math.round(ev.amount)} (поглотил урон/распался)`
+        );
+        break;
+      case 'charge':
+        charges.push(`${ev.side}:${ev.heroId}${ev.amount > 0 ? '+' : ''}${ev.amount.toFixed(1)}`);
+        break;
+      case 'death':
+        lines.push(`  ** СМЕРТЬ ${ev.side}:${ev.heroId} **`);
+        break;
+    }
+  }
+  if (charges.length > 0) lines.push(`  заряды: ${charges.join(' ')}`);
+  return lines;
+}
+
 function computeStatus(state: BattleState): BattleStatus {
   const aliveA = isAlive(state.teamA);
   const aliveB = isAlive(state.teamB);
@@ -178,6 +230,7 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   const defendingTeam = acting === 'A' ? state.teamB : state.teamA;
 
   state.turns++;
+  const shieldBeforeDecay = actingTeam.shield;
   decayShield(actingTeam);
 
   const beforeA = snapshotTeam(state.teamA);
@@ -192,8 +245,20 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   events.push(...diffTeamEvents('A', beforeA, state.teamA, decision.ultimateCasterId));
   events.push(...diffTeamEvents('B', beforeB, state.teamB, decision.ultimateCasterId));
 
+  state.log.push(
+    `--- Действие ${state.turns} | ходит ${acting} | множитель урона ${damageMult.toFixed(2)}` +
+      (Math.round(shieldBeforeDecay) > 0
+        ? ` | распад щита ${acting}: ${Math.round(shieldBeforeDecay)} → ${Math.round(shieldBeforeDecay * SHIELD_RETENTION_PER_TURN)}`
+        : ''),
+    `  цепочка ${decision.chain.effectiveType} x${decision.chain.cells.length}` +
+      `${decision.chain.includesAbilityTile ? ' +звезда' : ''}` +
+      `${decision.focusTargetId ? ` | фокус ${decision.focusTargetId}` : ''}`,
+    ...fmtEvents(events)
+  );
+
   state.status = computeStatus(state);
   if (state.status === 'ongoing') state.acting = acting === 'A' ? 'B' : 'A';
+  else state.log.push(`=== ИТОГ: ${state.status === 'draw' ? 'ничья' : `победа ${state.status}`} за ${state.turns} действий`);
 
   return { events, status: state.status };
 }
@@ -233,7 +298,15 @@ export function playUltimate(state: BattleState, side: Side, casterId: string, f
     ...diffTeamEvents('A', beforeA, state.teamA, casterId),
     ...diffTeamEvents('B', beforeB, state.teamB, casterId),
   ];
+  state.log.push(
+    `--- Ульта вне хода | ${side}:${casterId} | множитель урона ${damageMult.toFixed(2)}` +
+      (focusTargetId ? ` | фокус ${focusTargetId}` : ''),
+    ...fmtEvents(events.slice(1))
+  );
   state.status = computeStatus(state);
+  if (state.status !== 'ongoing') {
+    state.log.push(`=== ИТОГ: ${state.status === 'draw' ? 'ничья' : `победа ${state.status}`} за ${state.turns} действий`);
+  }
   return { events, status: state.status };
 }
 
