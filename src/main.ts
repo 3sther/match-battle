@@ -7,7 +7,7 @@ new Phaser.Game({
   height: 1280,
   backgroundColor: '#0d1b2e',
   scale: {
-    mode: Phaser.Scale.FIT,
+    mode: Phaser.Scale.EXPAND,
     autoCenter: Phaser.Scale.CENTER_BOTH
   },
   scene: [BootScene]
