@@ -2,7 +2,7 @@
 // полезности (уровень 2). Используется и симулятором баланса, и (позже) PvE-ботом клиента.
 
 import { buildPathChain, getConnectedComponents } from './board';
-import { chainLengthMultiplier } from './config';
+import { defenseLengthMultiplier, swordLengthMultiplier } from './config';
 import { computeSwordDamage } from './combat';
 import type { Board, Chain, TeamState } from './types';
 
@@ -35,7 +35,10 @@ function pickByLength(chains: Chain[]): Chain {
 }
 
 function scoreChain(chain: Chain, actingTeam: TeamState, defendingTeam: TeamState, focusTargetId?: string): number {
-  const mult = chainLengthMultiplier(chain.cells.length);
+  const mult =
+    chain.effectiveType === 'sword'
+      ? swordLengthMultiplier(chain.cells.length)
+      : defenseLengthMultiplier(chain.cells.length);
   let score = chain.cells.length * mult;
   if (chain.includesAbilityTile) score += 50; // мгновенный заряд всем ультам - весомый бонус
 

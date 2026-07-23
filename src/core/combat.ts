@@ -15,7 +15,8 @@ import {
   SWORD_POWER,
   TAUNT_TURNS,
   ULTIMATE_POWER,
-  chainLengthMultiplier,
+  defenseLengthMultiplier,
+  swordLengthMultiplier,
 } from './config';
 import type { Chain, CombatTileType, Faction, Hero, HeroState, TeamState, UltimateType } from './types';
 
@@ -34,9 +35,9 @@ function mitigation(def: number): number {
   return DEFENSE_MITIGATION_K / (DEFENSE_MITIGATION_K + def);
 }
 
-/** Урон меч-цепочки по одной цели: сумма atk живых героев (с фракц. бонусом) × chainMult × mitigation. */
+/** Урон меч-цепочки по одной цели: сумма atk живых героев (с фракц. бонусом) × swordMult × mitigation. */
 export function computeSwordDamage(actingTeam: TeamState, target: HeroState, chainLength: number): number {
-  const mult = chainLengthMultiplier(chainLength);
+  const mult = swordLengthMultiplier(chainLength);
   const sumAtk = actingTeam.heroes
     .filter((h) => h.hp > 0)
     .reduce((sum, h) => {
@@ -124,7 +125,8 @@ export function applyChain(
   applyChainCharge(actingTeam, chain.effectiveType);
   if (chain.includesAbilityTile) applyAbilityTileBonus(actingTeam);
 
-  const mult = chainLengthMultiplier(chain.cells.length);
+  // У защиты своя, пологая кривая длины (у меча - крутая, внутри computeSwordDamage).
+  const mult = defenseLengthMultiplier(chain.cells.length);
   switch (chain.effectiveType) {
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);
@@ -161,7 +163,7 @@ export function previewChainEffect(
   focusTargetId?: string,
   damageMult = 1
 ): number {
-  const mult = chainLengthMultiplier(length);
+  const mult = defenseLengthMultiplier(length);
   switch (type) {
     case 'sword': {
       const target = resolveFocusTarget(defendingTeam, focusTargetId);

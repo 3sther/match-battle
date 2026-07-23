@@ -2,11 +2,11 @@
 // и тестами). Правила хода (монетка/разогрев/распад щита/порядок ульта-затем-цепочка) общие
 // с headless-симулятором (simulateBattle в index.ts) - см. turn.ts, единая точка правды.
 
-import { createBoard } from './board';
-import { castUltimate, createTeamState } from './combat';
+import { createBoard, resolveChain } from './board';
+import { applyChain, castUltimate, createTeamState } from './combat';
 import { createRng, type Rng } from './rng';
 import { decideTurn, type AiLevel } from './ai';
-import { applyTurnDecision, computeDamageMult, decayShield, type TurnDecision } from './turn';
+import { computeDamageMult, decayShield, type TurnDecision } from './turn';
 import {
   FIRST_ACTION_DAMAGE_MULT,
   MAX_BATTLE_TURNS,
@@ -237,32 +237,55 @@ function runTurn(state: BattleState, decision: TurnDecision): ActionResult {
   state.turns++;
   const shieldBeforeDecay = actingTeam.shield;
   decayShield(actingTeam);
-
-  const beforeA = snapshotTeam(state.teamA);
-  const beforeB = snapshotTeam(state.teamB);
-
   const damageMult = computeDamageMult(state.turns, state.firstActionDamageMult);
-  applyTurnDecision(state.board, actingTeam, defendingTeam, decision, state.rng, damageMult);
-
-  const events: BattleEvent[] = [];
-  if (decision.ultimateCasterId) events.push({ type: 'ultimateCast', side: acting, heroId: decision.ultimateCasterId });
-  events.push({ type: 'chainResolved', side: acting, chain: decision.chain });
-  events.push(...diffTeamEvents('A', beforeA, state.teamA, decision.ultimateCasterId));
-  events.push(...diffTeamEvents('B', beforeB, state.teamB, decision.ultimateCasterId));
-
   const taunter = defendingTeam.heroes.find((h) => h.hp > 0 && h.tauntTurns > 0);
+
   state.log.push(
     `--- Действие ${state.turns} | ходит ${acting} | множитель урона ${damageMult.toFixed(2)}` +
       (Math.round(shieldBeforeDecay) > 0
         ? ` | распад щита ${acting}: ${Math.round(shieldBeforeDecay)} → ${Math.round(shieldBeforeDecay * SHIELD_RETENTION_PER_TURN)}`
-        : ''),
+        : '')
+  );
+
+  const events: BattleEvent[] = [];
+
+  // Фаза 1: ульта (до цепочки, по DESIGN). Логируется отдельно от цепочки, чтобы урон
+  // ульты и урон цепочки не сливались в одну цифру.
+  if (decision.ultimateCasterId) {
+    const caster = actingTeam.heroes.find((h) => h.hero.id === decision.ultimateCasterId && h.hp > 0);
+    if (caster) {
+      const beforeA = snapshotTeam(state.teamA);
+      const beforeB = snapshotTeam(state.teamB);
+      castUltimate(caster, actingTeam, defendingTeam, decision.focusTargetId, damageMult);
+      const ultEvents: BattleEvent[] = [
+        { type: 'ultimateCast', side: acting, heroId: caster.hero.id },
+        ...diffTeamEvents('A', beforeA, state.teamA, caster.hero.id),
+        ...diffTeamEvents('B', beforeB, state.teamB, caster.hero.id),
+      ];
+      events.push(...ultEvents);
+      state.log.push(`  УЛЬТА ${acting}:${caster.hero.id}:`, ...fmtEvents(ultEvents.slice(1)));
+    }
+  }
+
+  // Фаза 2: цепочка.
+  const beforeA = snapshotTeam(state.teamA);
+  const beforeB = snapshotTeam(state.teamB);
+  resolveChain(state.board, decision.chain, state.rng);
+  applyChain(actingTeam, defendingTeam, decision.chain, decision.focusTargetId, damageMult);
+  const chainEvents: BattleEvent[] = [
+    { type: 'chainResolved', side: acting, chain: decision.chain },
+    ...diffTeamEvents('A', beforeA, state.teamA),
+    ...diffTeamEvents('B', beforeB, state.teamB),
+  ];
+  events.push(...chainEvents);
+  state.log.push(
     `  цепочка ${decision.chain.effectiveType} x${decision.chain.cells.length}` +
       `${decision.chain.includesAbilityTile ? ' +звезда' : ''}` +
       `${decision.focusTargetId ? ` | фокус ${decision.focusTargetId}` : ''}`,
     ...(decision.chain.effectiveType === 'sword' && taunter && decision.focusTargetId !== taunter.hero.id
       ? [`  (провокация: удар перехватил ${taunter.hero.id})`]
       : []),
-    ...fmtEvents(events)
+    ...fmtEvents(chainEvents)
   );
 
   state.status = computeStatus(state);

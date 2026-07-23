@@ -16,7 +16,8 @@ import {
   OVERCHARGE_BONUS_PER_100,
   SHIELD_DEF_FRACTION,
   SWORD_POWER,
-  chainLengthMultiplier,
+  defenseLengthMultiplier,
+  swordLengthMultiplier,
 } from '../config';
 import type { Chain, Hero } from '../types';
 
@@ -55,7 +56,7 @@ describe('урон меч-цепочки', () => {
     const target = createTeamState([makeHero({ id: 'def', def: 0, faction: 'yin' })]).heroes[0];
 
     const dmg = computeSwordDamage(team, target, 3);
-    const expected = 100 * SWORD_POWER * chainLengthMultiplier(3) * (DEFENSE_MITIGATION_K / DEFENSE_MITIGATION_K);
+    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3) * (DEFENSE_MITIGATION_K / DEFENSE_MITIGATION_K);
     expect(dmg).toBeCloseTo(expected, 5);
   });
 
@@ -66,7 +67,7 @@ describe('урон меч-цепочки', () => {
 
     const dmg = computeSwordDamage(team, target, 3);
     const mitigation = DEFENSE_MITIGATION_K / (DEFENSE_MITIGATION_K + 100);
-    const expected = 100 * SWORD_POWER * chainLengthMultiplier(3) * mitigation;
+    const expected = 100 * SWORD_POWER * swordLengthMultiplier(3) * mitigation;
     expect(dmg).toBeCloseTo(expected, 5);
   });
 
@@ -95,7 +96,7 @@ describe('лечение и щит от цепочек', () => {
 
     applyChain(team, enemyTeam, chain);
 
-    const mult = chainLengthMultiplier(3);
+    const mult = defenseLengthMultiplier(3);
     const expectedLightGain = HEART_HEAL_BASE_FRACTION * (1 + 0.1) * 1000 * mult;
     const expectedHeavyGain = HEART_HEAL_BASE_FRACTION * (1 + 0.5) * 1000 * mult;
     expect(team.heroes[0].hp - 900).toBeCloseTo(expectedLightGain, 5);
@@ -123,7 +124,7 @@ describe('лечение и щит от цепочек', () => {
 
     applyChain(team, enemyTeam, chain);
 
-    const expected = 50 * SHIELD_DEF_FRACTION * chainLengthMultiplier(3);
+    const expected = 50 * SHIELD_DEF_FRACTION * defenseLengthMultiplier(3);
     expect(team.shield).toBeCloseTo(expected, 5);
   });
 });
